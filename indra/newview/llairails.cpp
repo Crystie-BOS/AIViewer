@@ -6,9 +6,7 @@
 #include "llviewerprecompiledheaders.h"
 #include "llairails.h"
 #include "llfile.h"
-#include "lldiriterator.h"
 #include "lldir.h"
-#include "lllog.h"
 #include <fstream>
 #include <sstream>
 #include <ctime>

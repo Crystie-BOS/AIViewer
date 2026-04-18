@@ -18,10 +18,10 @@
 #include "llselectmgr.h"
 #include "lltoolgrab.h"
 #include "llnotificationsutil.h"
+#include "llviewermessage.h"
 #include "llcallbacklist.h"
 #include "llcoordframe.h"
 #include "llsd.h"
-#include "lllog.h"
 #include "indra_constants.h"
 #include <cmath>
 
@@ -195,16 +195,7 @@ void LLAICommands::cmdIM(const LLSD& p)
     LLUUID toId(p["to"].asString());
     if (toId.isNull()) { sendError("im", "invalid_uuid"); return; }
 
-    // Open/reuse session and send
-    std::string text = p["text"].asString();
-    LLUUID sessionId = gIMMgr->computeSessionID(IM_NOTHING_SPECIAL, toId);
-    gIMMgr->addMessage(sessionId, gAgent.getID(), gAgent.getName(), text,
-                       LLStringUtil::null, IM_NOTHING_SPECIAL, 0, LLUUID::null,
-                       LLVector3::zero, true);
-    pack_instant_message(gMessageSystem, gAgent.getID(), false, gAgent.getSessionID(),
-                         toId, gAgent.getName(), text, IM_ONLINE, IM_NOTHING_SPECIAL,
-                         sessionId, 0, LLUUID::null);
-    gAgent.sendReliableMessage();
+    send_improved_im(toId, gAgent.getName(), p["text"].asString());
     sendOk("im");
 }
 

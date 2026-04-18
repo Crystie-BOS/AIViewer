@@ -13,9 +13,9 @@
 #include "llviewerregion.h"
 #include "llvoavatarself.h"
 #include "llworld.h"
+#include "llavatarnamecache.h"
 #include "llcallbacklist.h"
 #include "llsd.h"
-#include "lllog.h"
 #include "llcoordframe.h"
 #include <cmath>
 
@@ -103,7 +103,7 @@ void LLAIState::publishState()
     // Assemble LLSD
     LLSD ev;
     ev["event"]   = "state_tick";
-    ev["ts"]      = (LLSD::Integer)LLTimer::getTotalSeconds();
+    ev["ts"]      = (LLSD::Integer)(S32)LLTimer::getTotalSeconds();
     ev["pos"]     = LLSD::emptyArray();
     ev["pos"][0]  = posGlobal.mdV[VX];
     ev["pos"][1]  = posGlobal.mdV[VY];
@@ -167,7 +167,7 @@ void LLAIState::publishNearby()
 
     uuid_vec_t ids;
     std::vector<LLVector3d> positions;
-    gWorld.getAvatars(&ids, &positions, gAgent.getPositionGlobal(), 96.f /*meters*/);
+    LLWorld::instance().getAvatars(&ids, &positions, gAgent.getPositionGlobal(), 96.f /*meters*/);
 
     LLSD ev;
     ev["event"]   = "nearby_avatars";

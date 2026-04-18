@@ -7,7 +7,6 @@
 #include "llaisocket.h"
 #include "llsd.h"
 #include "llsdjson.h"
-#include "lllog.h"
 
 #if LL_LINUX
 #include <sys/socket.h>
