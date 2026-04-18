@@ -125,3 +125,27 @@ bool LLAIEvents::onNotification(const LLSD& data)
     LLAISocket::instance().sendEvent(ev);
     return false; // do not suppress — UI still shows it
 }
+
+// ── object properties (called from llselectmgr.cpp patch) ────────────────────
+
+void LLAIEvents::onObjectProperties(const LLUUID& id, const std::string& name,
+                                     const std::string& desc, const LLUUID& owner_id,
+                                     const LLUUID& creator_id)
+{
+    LLSD ev;
+    ev["event"]      = "object_props";
+    ev["id"]         = id.asString();
+    ev["name"]       = name;
+    ev["desc"]       = desc;
+    ev["owner_id"]   = owner_id.asString();
+    ev["creator_id"] = creator_id.asString();
+    LLAISocket::instance().sendEvent(ev);
+}
+
+// Free function called from llselectmgr.cpp via extern declaration
+void ai_on_object_properties(const LLUUID& id, const std::string& name,
+                              const std::string& desc, const LLUUID& owner_id,
+                              const LLUUID& creator_id)
+{
+    LLAIEvents::instance().onObjectProperties(id, name, desc, owner_id, creator_id);
+}

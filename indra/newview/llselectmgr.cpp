@@ -6310,6 +6310,15 @@ void LLSelectMgr::processObjectPropertiesFamily(LLMessageSystem* msg, void** use
     }
 
     dialog_refresh_all();
+
+    // AI API: emit object_props event
+    {
+        // Include llaievents here via forward declaration to avoid circular deps
+        extern void ai_on_object_properties(const LLUUID& id, const std::string& name,
+                                             const std::string& desc, const LLUUID& owner_id,
+                                             const LLUUID& creator_id);
+        ai_on_object_properties(id, name, desc, owner_id, creator_id);
+    }
 }
 
 

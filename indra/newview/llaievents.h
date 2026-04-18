@@ -34,6 +34,11 @@ public:
     // Called from LLFloaterIMNearbyChat::addMessage() for local chat events.
     void onChat(const LLChat& chat);
 
+    // Called from llselectmgr.cpp when ObjectPropertiesFamily arrives.
+    void onObjectProperties(const LLUUID& id, const std::string& name,
+                            const std::string& desc, const LLUUID& owner_id,
+                            const LLUUID& creator_id);
+
 private:
     bool onIMMessage(const LLSD& data);
     bool onNotification(const LLSD& data);
