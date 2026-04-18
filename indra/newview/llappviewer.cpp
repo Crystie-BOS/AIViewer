@@ -189,6 +189,13 @@
 #include "llworldmapview.h"
 #include "llpostprocess.h"
 
+// AI control API
+#include "llaisocket.h"
+#include "llaistate.h"
+#include "llaicommands.h"
+#include "llaievents.h"
+#include "llairails.h"
+
 #include "lldebugview.h"
 #include "llconsole.h"
 #include "llcontainerview.h"
@@ -398,10 +405,10 @@ WorkQueue gMainloopWork("mainloop", 1024*1024);
 // Internal globals... that should be removed.
 static std::string gArgs;
 const int MAX_MARKER_LENGTH = 1024;
-const std::string MARKER_FILE_NAME("Kokua.exec_marker");
-const std::string START_MARKER_FILE_NAME("Kokua.start_marker");
-const std::string ERROR_MARKER_FILE_NAME("Kokua.error_marker");
-const std::string LOGOUT_MARKER_FILE_NAME("Kokua.logout_marker");
+const std::string MARKER_FILE_NAME("AIViewer.exec_marker");
+const std::string START_MARKER_FILE_NAME("AIViewer.start_marker");
+const std::string ERROR_MARKER_FILE_NAME("AIViewer.error_marker");
+const std::string LOGOUT_MARKER_FILE_NAME("AIViewer.logout_marker");
 static std::string gLaunchFileOnQuit;
 
 // Used on Win32 for other apps to identify our window (eg, win_setup)
@@ -713,7 +720,7 @@ LLAppViewer::LLAppViewer()
 
     // Need to do this initialization before we do anything else, since anything
     // that touches files should really go through the lldir API
-    gDirUtilp->initAppDirs("Kokua");
+    gDirUtilp->initAppDirs("AIViewer");
     //
     // IMPORTANT! Do NOT put anything that will write
     // into the log files during normal startup until AFTER
@@ -786,7 +793,7 @@ bool LLAppViewer::init()
     //initialize particle index pool
     LLVOPartGroup::initClass();
 
-    gDirUtilp->initAppDirs("Kokua");// this is setting up $HOME/.kokua
+    gDirUtilp->initAppDirs("AIViewer");// this is setting up $HOME/.aiviewer
     // set skin search path to default, will be overridden later
     // this allows simple skinned file lookups to work
     gDirUtilp->setSkinFolder("default", "en");
@@ -2026,6 +2033,12 @@ void LLAppViewer::flushLFSIO()
 
 bool LLAppViewer::cleanup()
 {
+    // AI API: tear down before other singletons are destroyed
+    LLAIEvents::instance().stop();
+    LLAICommands::instance().stop();
+    LLAIState::instance().stop();
+    LLAISocket::instance().stop();
+
     //ditch LLVOAvatarSelf instance
     gAgentAvatarp = NULL;
 
@@ -2737,12 +2750,12 @@ void LLAppViewer::initLoggingAndGetLastDuration()
 
         // Remove the last ".old" log file.
         std::string old_log_file = gDirUtilp->getExpandedFilename(LL_PATH_LOGS,
-                                 "Kokua.old");
+                                 "AIViewer.old");
         LLFile::remove(old_log_file);
 
         // Get name of the log file
         std::string log_file = gDirUtilp->getExpandedFilename(LL_PATH_LOGS,
-                                 "Kokua.log");
+                                 "AIViewer.log");
         /*
         * Before touching any log files, compute the duration of the last run
         * by comparing the ctime of the previous start marker file with the ctime
@@ -4120,14 +4133,14 @@ void LLAppViewer::writeSystemInfo()
 
 #if LL_DARWIN
     // crash processing in CrashMetadataSingleton reads SLLog
-    gDebugInfo["SLLog"] = gDirUtilp->getExpandedFilename(LL_PATH_LOGS,"Kokua.crash");
+    gDebugInfo["SLLog"] = gDirUtilp->getExpandedFilename(LL_PATH_LOGS,"AIViewer.crash");
 #elif LL_WINDOWS && !LL_BUGSPLAT
-    gDebugInfo["SLLog"] = gDirUtilp->getExpandedFilename(LL_PATH_DUMP,"Kokua.log");
+    gDebugInfo["SLLog"] = gDirUtilp->getExpandedFilename(LL_PATH_DUMP,"AIViewer.log");
 #else
     // Far from ideal, especially when multiple instances get involved.
     // Note that attachmentsForBugSplat expects .old extension.
     // Todo: improve.
-    gDebugInfo["SLLog"] = gDirUtilp->getExpandedFilename(LL_PATH_LOGS,"Kokua.old");  //LLError::logFileName();
+    gDebugInfo["SLLog"] = gDirUtilp->getExpandedFilename(LL_PATH_LOGS,"AIViewer.old");  //LLError::logFileName();
 #endif
 
     gDebugInfo["ClientInfo"]["Name"] = LLVersionInfo::instance().getChannel();
@@ -6523,6 +6536,13 @@ void LLAppViewer::handleLoginComplete()
 
     mOnLoginCompleted();
     setViewerWindowTitle();
+
+    // AI API: start socket server, state publisher, command dispatcher, event hooks
+    LLAISocket::instance().start();
+    LLAIRails::instance().loadConfig();
+    LLAIState::instance().start();
+    LLAICommands::instance().start();
+    LLAIEvents::instance().start();
 // [SL:KB] - Patch: Inventory-UserProtectedFolders | Checked: Catznip-5.2
     LLUserProtectedFolders::instance().fromLLSD(gSavedPerAccountSettings.getLLSD("UserProtectedFolders"));
 

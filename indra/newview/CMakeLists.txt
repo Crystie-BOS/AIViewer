@@ -86,6 +86,11 @@ include_directories(
 set(viewer_SOURCE_FILES
     RRInterface.cpp
     animationexplorer.cpp
+    llaisocket.cpp
+    llaistate.cpp
+    llaicommands.cpp
+    llaievents.cpp
+    llairails.cpp
     ao.cpp
     aoengine.cpp
     aoset.cpp
@@ -804,13 +809,18 @@ set(viewer_SOURCE_FILES
     rlveffects.cpp
     )
 
-set(VIEWER_BINARY_NAME "kokua-bin" CACHE STRING
+set(VIEWER_BINARY_NAME "ai-viewer" CACHE STRING
     "The name of the viewer executable to create.")
 
 set(viewer_HEADER_FILES
     CMakeLists.txt
     ViewerInstall.cmake
     RRInterface.h
+    llaisocket.h
+    llaistate.h
+    llaicommands.h
+    llaievents.h
+    llairails.h
     RRInterfaceHelper.h
     RRInterfaceVersion.h
     animationexplorer.h	

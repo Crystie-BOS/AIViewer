@@ -84,6 +84,9 @@ constexpr S32 EXPANDED_MIN_HEIGHT = 150;
 // legacy callback glue
 void send_chat_from_viewer(const std::string& utf8_out_text, EChatType type, S32 channel);
 
+// AI API hook — forward declared here, defined in llaievents.cpp
+#include "llaievents.h"
+
 struct LLChatTypeTrigger {
     std::string name;
     EChatType type;
@@ -725,6 +728,8 @@ void LLFloaterIMNearbyChat::sendChatWithText( EChatType type, LLWString text)
 
 void LLFloaterIMNearbyChat::addMessage(const LLChat& chat,bool archive,const LLSD &args)
 {
+    LLAIEvents::instance().onChat(chat);
+
     LLSD chat_args = args;
     chat_args["is_local"] = true;
     appendMessage(chat, chat_args);
