@@ -1,0 +1,115 @@
+name: Build AI Viewer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create GitHub release'
+        type: boolean
+        default: false
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone viewer-build-variables
+        run: |
+          git clone https://github.com/Crystie-BOS/viewer-build-variables.git /opt/viewer-build-variables
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            pkg-config \
+            python3-pip \
+            libgl-dev \
+            libglu1-mesa-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            libpulse-dev \
+            libasound2-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxss-dev \
+            libxxf86vm-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libfontconfig1-dev \
+            libfreetype-dev \
+            libssl-dev \
+            zlib1g-dev \
+            libjpeg-dev \
+            libpng-dev \
+            libexpat1-dev \
+            bzip2 \
+            gcc-12 \
+            g++-12
+
+      - name: Install autobuild
+        run: pip3 install autobuild
+
+      - name: Configure
+        env:
+          AUTOBUILD_VARIABLES_FILE: /opt/viewer-build-variables/variables
+        run: |
+          autobuild configure -A 64 -c ReleaseOS -- \
+            -DCMAKE_VERBOSE_MAKEFILE:BOOL=FALSE \
+            -DLL_TESTS:BOOL=OFF \
+            -DPACKAGE:BOOL=FALSE \
+            -DOPENAL:BOOL=TRUE \
+            -DFMODSTUDIO:BOOL=OFF \
+            -DUSE_KDU:BOOL=OFF \
+            -DHAVOK_TPV:BOOL=OFF \
+            -DHAVOK:BOOL=OFF \
+            -DRLV_ALWAYS_ON:BOOL=TRUE
+
+      - name: Build
+        env:
+          AUTOBUILD_VARIABLES_FILE: /opt/viewer-build-variables/variables
+        run: autobuild build -A 64 -c ReleaseOS --no-configure
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME:-$(git describe --tags --always)}"
+
+          # Locate the binary (build dir varies slightly by autobuild version)
+          BINARY=$(find . -path "*/newview/ai-viewer" -type f | head -1)
+          if [ -z "$BINARY" ]; then
+            echo "ERROR: ai-viewer binary not found"
+            find . -name "ai-viewer" -type f
+            exit 1
+          fi
+          BUILD_DIR=$(dirname "$BINARY")
+          echo "Found binary at: $BINARY  (dir: $BUILD_DIR)"
+
+          mkdir -p dist
+          tar -czf "dist/ai-viewer-${VERSION}-linux64.tar.gz" -C "$BUILD_DIR" .
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-viewer-linux64
+          path: dist/
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
