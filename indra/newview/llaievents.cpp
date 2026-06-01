@@ -10,10 +10,9 @@
 #include "llnotifications.h"
 #include "llchat.h"
 #include "llsd.h"
-#include "lllog.h"
 #include "lluuid.h"
 
-static const std::string LOG_AI("AI");
+static constexpr const char* LOG_AI = "AI";
 
 LLAIEvents::LLAIEvents() = default;
 
@@ -68,9 +67,9 @@ bool LLAIEvents::onIMMessage(const LLSD& data)
     LLSD ev;
     ev["event"]      = "im";
     ev["from"]       = data.has("from") ? data["from"] : LLSD("");
-    ev["from_id"]    = data.has("from_id") ? data["from_id"].asString() : LLSD("");
+    ev["from_id"]    = data.has("from_id") ? LLSD(data["from_id"].asString()) : LLSD("");
     ev["text"]       = data.has("message") ? data["message"] : LLSD("");
-    ev["session_id"] = data.has("session_id") ? data["session_id"].asString() : LLSD("");
+    ev["session_id"] = data.has("session_id") ? LLSD(data["session_id"].asString()) : LLSD("");
     ev["ts"]         = (LLSD::Integer)LLTimer::getTotalSeconds();
     LLAISocket::instance().sendEvent(ev);
     return false; // do not consume — let UI handle it too

@@ -1342,7 +1342,7 @@ class LinuxManifest(ViewerManifest):
             self.path("install.sh")
 
         with self.prefix(src="", dst="bin"):
-            self.path("kokua-bin","do-not-directly-run-kokua-bin")
+            self.path("ai-viewer","do-not-directly-run-kokua-bin")
             self.path2basename("../llplugin/slplugin", "SLPlugin")
 
         # recurses, packaged again

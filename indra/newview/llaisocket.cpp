@@ -20,7 +20,18 @@
 #include <boost/json.hpp>
 #endif
 
-static const std::string LOG_AI("AI");
+static constexpr const char* LOG_AI = "AI";
+
+#if LL_LINUX
+namespace
+{
+void writeSocketMessage(int fd, const std::string& msg)
+{
+    const ssize_t written = ::write(fd, msg.c_str(), msg.size());
+    (void)written;
+}
+}
+#endif
 
 LLAISocket::LLAISocket()  = default;
 LLAISocket::~LLAISocket() { stop(); }
@@ -118,7 +129,7 @@ void LLAISocket::socketThread()
         greet["version"] = "1.0";
         greet["sock"]    = mSockPath;
         std::string msg  = boost::json::serialize(greet) + "\n";
-        ::write(fd, msg.c_str(), msg.size());
+        writeSocketMessage(fd, msg);
     };
 
     while (!mShouldStop)
@@ -141,6 +152,7 @@ void LLAISocket::socketThread()
                 if (cfd >= 0)
                 {
                     mClients.push_back({ cfd, {} });
+                    mClientCount.store((int)mClients.size());
                     sendGreeting(cfd);
                     LL_INFOS(LOG_AI) << "AI socket: client connected (fd " << cfd << ")" << LL_ENDL;
                 }
@@ -163,6 +175,7 @@ void LLAISocket::socketThread()
                             return std::find(toRemove.begin(), toRemove.end(), c.fd) != toRemove.end();
                         }),
                     mClients.end());
+                mClientCount.store((int)mClients.size());
             }
         }
 
@@ -173,6 +186,7 @@ void LLAISocket::socketThread()
     // Cleanup
     for (auto& c : mClients) ::close(c.fd);
     mClients.clear();
+    mClientCount.store(0);
 }
 
 void LLAISocket::flushOutbound()
@@ -186,7 +200,7 @@ void LLAISocket::flushOutbound()
 
     for (auto& msg : out)
         for (auto& c : mClients)
-            ::write(c.fd, msg.c_str(), msg.size());
+            writeSocketMessage(c.fd, msg);
 }
 
 void LLAISocket::handleClientRead(ClientConn& c, std::vector<int>& to_remove)
@@ -224,7 +238,7 @@ void LLAISocket::handleClientRead(ClientConn& c, std::vector<int>& to_remove)
             err["event"]  = "error";
             err["reason"] = "json_parse_failed";
             std::string errMsg = boost::json::serialize(err) + "\n";
-            ::write(c.fd, errMsg.c_str(), errMsg.size());
+            writeSocketMessage(c.fd, errMsg);
         }
     }
 }

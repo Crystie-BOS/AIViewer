@@ -11,7 +11,7 @@
 #include <sstream>
 #include <ctime>
 
-static const std::string LOG_AI("AI");
+static constexpr const char* LOG_AI = "AI";
 
 LLAIRails::LLAIRails()
 {

@@ -123,7 +123,6 @@ bool LLWindowSDL::ll_try_gtk_init(void)
     if (!tried_gtk_init)
     {
         tried_gtk_init = true;
-        if (!g_thread_supported ()) g_thread_init (NULL);
         maybe_lock_display();
         gtk_is_good = gtk_init_check(NULL, NULL);
         maybe_unlock_display();
@@ -485,10 +484,12 @@ bool LLWindowSDL::createContext(int x, int y, int width, int height, int bits, b
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, (bits <= 16) ? 16 : 24);
     // We need stencil support for a few (minor) things.
     if (!getenv("LL_GL_NO_STENCIL"))
+    {
         SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-        SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, (bits <= 16) ? 1 : 8);
+    }
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, (bits <= 16) ? 1 : 8);
 
-        // *FIX: try to toggle vsync here?
+    // *FIX: try to toggle vsync here?
 
     mFullscreen = fullscreen;
 

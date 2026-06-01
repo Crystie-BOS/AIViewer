@@ -492,6 +492,20 @@ void idle_afk_check()
         return;
     }
 
+    // A connected AI controller means this viewer is being actively driven.
+    if (LLAISocket::instance().hasClients())
+    {
+        if (gAgent.getAFK())
+        {
+            gAgent.clearAFK();
+        }
+        else
+        {
+            gAwayTriggerTimer.reset();
+        }
+        return;
+    }
+
     // check idle timers
     F32 current_idle = gAwayTriggerTimer.getElapsedTimeF32();
     static LLCachedControl<S32> afk_timeout(gSavedSettings, "AFKTimeout", 300);

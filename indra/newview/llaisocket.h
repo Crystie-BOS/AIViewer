@@ -9,6 +9,7 @@
 
 #include "llsd.h"
 #include "llsingleton.h"
+#include <atomic>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -35,6 +36,7 @@ public:
     bool pollCommand(LLSD& out_cmd);
 
     std::string getSockPath() const { return mSockPath; }
+    bool hasClients() const { return mClientCount.load() > 0; }
 
 private:
 #if LL_LINUX
@@ -63,6 +65,7 @@ private:
     std::deque<LLSD> mCmdQueue;
 
     std::vector<ClientConn> mClients;
+    std::atomic_int mClientCount { 0 };
 #endif
 };
 

@@ -56,7 +56,7 @@ elseif (LINUX)
     if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         set_source_files_properties(
             llwebrtc.cpp
-            PROPERTIES COMPILE_FLAGS -Wno-delete-non-virtual-dtor)
+            PROPERTIES COMPILE_FLAGS "-Wno-delete-non-virtual-dtor -fpermissive")
     endif()
     target_link_libraries(llwebrtc PRIVATE ll::webrtc)
 endif (WINDOWS)

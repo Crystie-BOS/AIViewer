@@ -9,6 +9,7 @@
 #include "llaistate.h"
 #include "llairails.h"
 #include "llagent.h"
+#include "llagentui.h"
 #include "llagentcamera.h"
 #include "llviewercamera.h"
 #include "llviewerwindow.h"
@@ -16,6 +17,12 @@
 #include "llviewerobjectlist.h"
 #include "llviewerobject.h"
 #include "llselectmgr.h"
+#include "llfloaterreg.h"
+#include "llfloater.h"
+#include "llview.h"
+#include "llfloatermap.h"
+#include "llnetmap.h"
+#include "llimagepng.h"
 #include "lltoolgrab.h"
 #include "llnotificationsutil.h"
 #include "llviewermessage.h"
@@ -23,12 +30,270 @@
 #include "llcoordframe.h"
 #include "llsd.h"
 #include "indra_constants.h"
+#include "llviewerparcelmgr.h"
+#include "llparcel.h"
 #include <cmath>
+#include <cstring>
+#include <set>
+#include <vector>
 
 // Forward declaration — defined in llfloaterimnearbychat.cpp
 void send_chat_from_viewer(const std::string& utf8_out_text, EChatType type, S32 channel);
 
-static const std::string LOG_AI("AI");
+static constexpr const char* LOG_AI = "AI";
+
+namespace
+{
+LLSD rect_to_llsd(const LLRect& rect)
+{
+    LLSD out;
+    out["left"] = rect.mLeft;
+    out["bottom"] = rect.mBottom;
+    out["right"] = rect.mRight;
+    out["top"] = rect.mTop;
+    out["width"] = rect.getWidth();
+    out["height"] = rect.getHeight();
+    return out;
+}
+
+bool rect_is_valid(const LLRect& rect)
+{
+    return rect.getWidth() > 0 && rect.getHeight() > 0;
+}
+
+LLRect clamp_rect_to_bounds(const LLRect& rect, const LLRect& bounds)
+{
+    LLRect clipped(
+        llmax(rect.mLeft, bounds.mLeft),
+        llmin(rect.mTop, bounds.mTop),
+        llmin(rect.mRight, bounds.mRight),
+        llmax(rect.mBottom, bounds.mBottom));
+    if (!rect_is_valid(clipped))
+    {
+        return LLRect();
+    }
+    return clipped;
+}
+
+LLRect map_rect_to_image(const LLRect& rect, const LLRect& basis, S32 out_width, S32 out_height)
+{
+    LLRect clipped = clamp_rect_to_bounds(rect, basis);
+    if (!rect_is_valid(clipped) || basis.getWidth() <= 0 || basis.getHeight() <= 0)
+    {
+        return LLRect();
+    }
+
+    const F32 scale_x = (F32)out_width / (F32)basis.getWidth();
+    const F32 scale_y = (F32)out_height / (F32)basis.getHeight();
+    LLRect mapped(
+        llround((clipped.mLeft - basis.mLeft) * scale_x),
+        llround((clipped.mTop - basis.mBottom) * scale_y),
+        llround((clipped.mRight - basis.mLeft) * scale_x),
+        llround((clipped.mBottom - basis.mBottom) * scale_y));
+    return clamp_rect_to_bounds(mapped, LLRect(0, out_height, out_width, 0));
+}
+
+std::string replace_extension(const std::string& path, const std::string& suffix)
+{
+    const std::string::size_type slash = path.find_last_of("/\\");
+    const std::string::size_type dot = path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+    {
+        return path + suffix;
+    }
+    return path.substr(0, dot) + suffix + path.substr(dot);
+}
+
+bool save_png_image(LLImageRaw* raw, const std::string& path)
+{
+    if (!raw)
+    {
+        return false;
+    }
+    LLPointer<LLImagePNG> png = new LLImagePNG();
+    return png->encode(raw, 0.0f) && png->save(path);
+}
+
+bool crop_and_save_png(LLImageRaw* source, const LLRect& image_rect, const std::string& path)
+{
+    if (!source || !rect_is_valid(image_rect))
+    {
+        return false;
+    }
+
+    const S32 src_width = source->getWidth();
+    const S32 src_height = source->getHeight();
+    const S32 components = source->getComponents();
+    if (src_width <= 0 || src_height <= 0 || components <= 0)
+    {
+        return false;
+    }
+
+    LLRect clipped = clamp_rect_to_bounds(image_rect, LLRect(0, src_height, src_width, 0));
+    if (!rect_is_valid(clipped))
+    {
+        return false;
+    }
+
+    LLPointer<LLImageRaw> cropped = new LLImageRaw();
+    if (!cropped->resize((U16)clipped.getWidth(), (U16)clipped.getHeight(), (S8)components))
+    {
+        return false;
+    }
+
+    const U8* src_data = source->getData();
+    U8* dst_data = cropped->getData();
+    const S32 src_stride = src_width * components;
+    const S32 dst_stride = clipped.getWidth() * components;
+
+    for (S32 row = 0; row < clipped.getHeight(); ++row)
+    {
+        const S32 src_y = clipped.mBottom + row;
+        std::memcpy(
+            dst_data + row * dst_stride,
+            src_data + src_y * src_stride + clipped.mLeft * components,
+            (size_t)dst_stride);
+    }
+
+    return save_png_image(cropped, path);
+}
+
+F32 current_heading_deg()
+{
+    LLVector3 at = gAgent.getFrameAgent().getAtAxis();
+    F32 heading = (F32)(std::atan2(at.mV[VX], at.mV[VY]) * RAD_TO_DEG);
+    while (heading < 0.f) heading += 360.f;
+    while (heading >= 360.f) heading -= 360.f;
+    return heading;
+}
+
+LLSD vector3d_to_array(const LLVector3d& value)
+{
+    LLSD out = LLSD::emptyArray();
+    out[0] = value.mdV[VX];
+    out[1] = value.mdV[VY];
+    out[2] = value.mdV[VZ];
+    return out;
+}
+
+LLSD vector3_to_array(const LLVector3& value)
+{
+    LLSD out = LLSD::emptyArray();
+    out[0] = value.mV[VX];
+    out[1] = value.mV[VY];
+    out[2] = value.mV[VZ];
+    return out;
+}
+
+bool llsd_to_vector3d(const LLSD& value, LLVector3d& out)
+{
+    if (!value.isArray() || value.size() < 3) return false;
+    out = LLVector3d(value[0].asReal(), value[1].asReal(), value[2].asReal());
+    return true;
+}
+
+bool llsd_to_vector3(const LLSD& value, LLVector3& out)
+{
+    if (!value.isArray() || value.size() < 3) return false;
+    out = LLVector3((F32)value[0].asReal(), (F32)value[1].asReal(), (F32)value[2].asReal());
+    return true;
+}
+
+void clear_movement_flags()
+{
+    gAgent.clearControlFlags(
+        AGENT_CONTROL_AT_POS | AGENT_CONTROL_AT_NEG |
+        AGENT_CONTROL_LEFT_POS | AGENT_CONTROL_LEFT_NEG |
+        AGENT_CONTROL_UP_POS | AGENT_CONTROL_UP_NEG);
+}
+
+bool apply_move_dir(const std::string& dir)
+{
+    if      (dir == "forward") { gAgent.moveAt(1); return true; }
+    else if (dir == "back")    { gAgent.moveAt(-1); return true; }
+    else if (dir == "left")    { gAgent.moveLeft(1); return true; }
+    else if (dir == "right")   { gAgent.moveLeft(-1); return true; }
+    else if (dir == "up")      { gAgent.moveUp(1); return true; }
+    else if (dir == "down")    { gAgent.moveUp(-1); return true; }
+    return false;
+}
+
+bool apply_move_pulse_dir(const std::string& dir)
+{
+    if      (dir == "forward") { gAgent.setControlFlags(AGENT_CONTROL_AT_POS); return true; }
+    else if (dir == "back")    { gAgent.setControlFlags(AGENT_CONTROL_AT_NEG); return true; }
+    else if (dir == "left")    { gAgent.setControlFlags(AGENT_CONTROL_LEFT_POS); return true; }
+    else if (dir == "right")   { gAgent.setControlFlags(AGENT_CONTROL_LEFT_NEG); return true; }
+    return false;
+}
+
+void apply_move_pulse_stop()
+{
+    clear_movement_flags();
+    gAgent.setControlFlags(AGENT_CONTROL_STOP);
+}
+
+F64 velocity_length(const LLVector3& value)
+{
+    return std::sqrt(
+        (F64)value.mV[VX] * (F64)value.mV[VX] +
+        (F64)value.mV[VY] * (F64)value.mV[VY] +
+        (F64)value.mV[VZ] * (F64)value.mV[VZ]);
+}
+
+LLRect screen_rect_for_view(LLView* view)
+{
+    if (!view || !view->isInVisibleChain())
+    {
+        return LLRect();
+    }
+    LLRect rect;
+    view->localRectToScreen(view->getLocalRect(), &rect);
+    return rect;
+}
+
+void add_region_metadata(LLSD& regions,
+                         const std::string& name,
+                         const LLRect& source_rect,
+                         const LLRect& image_rect,
+                         const std::string& crop_path,
+                         bool crop_saved)
+{
+    if (!rect_is_valid(source_rect) || !rect_is_valid(image_rect))
+    {
+        return;
+    }
+
+    LLSD region;
+    region["source_rect"] = rect_to_llsd(source_rect);
+    region["image_rect"] = rect_to_llsd(image_rect);
+    if (!crop_path.empty())
+    {
+        region["crop_path"] = crop_path;
+        region["crop_saved"] = crop_saved;
+    }
+    regions[name] = region;
+}
+
+void collect_requested_regions(const LLSD& value, std::set<std::string>& out)
+{
+    if (value.isArray())
+    {
+        for (LLSD::array_const_iterator it = value.beginArray(); it != value.endArray(); ++it)
+        {
+            const std::string region = it->asString();
+            if (!region.empty())
+            {
+                out.insert(region);
+            }
+        }
+    }
+    else if (value.isString() && !value.asString().empty())
+    {
+        out.insert(value.asString());
+    }
+}
+}
 
 LLAICommands::LLAICommands() = default;
 
@@ -65,6 +330,11 @@ void LLAICommands::onIdle()
         fn();
     }
 
+    // Reapply held movement each idle frame so manual move commands behave as
+    // continuous controls rather than one-frame nudges.
+    tickMovePulse();
+    tickHeldMove();
+
     // Tick navigation state machine
     tickNavigation();
 
@@ -100,8 +370,10 @@ void LLAICommands::dispatch(const LLSD& cmd)
     }
 
     if      (name == "move")                  cmdMove(cmd);
+    else if (name == "move_pulse")            cmdMovePulse(cmd);
     else if (name == "turn")                  cmdTurn(cmd);
     else if (name == "face")                  cmdFace(cmd);
+    else if (name == "camera_look")           cmdCameraLook(cmd);
     else if (name == "chat")                  cmdChat(cmd);
     else if (name == "im")                    cmdIM(cmd);
     else if (name == "teleport")              cmdTeleport(cmd);
@@ -109,6 +381,7 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "sit")                   cmdSit(cmd);
     else if (name == "stand")                 cmdStand(cmd);
     else if (name == "screenshot")            cmdScreenshot(cmd);
+    else if (name == "capture_perception")    cmdCapturePerception(cmd);
     else if (name == "get_state")             cmdGetState(cmd);
     else if (name == "get_nearby")            cmdGetNearby(cmd);
     else if (name == "get_objects")           cmdGetObjects(cmd);
@@ -119,6 +392,8 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "pause")                 cmdPause(cmd);
     else if (name == "resume")                cmdResume(cmd);
     else if (name == "dismiss_dialog")        cmdDismissDialog(cmd);
+    else if (name == "set_auto_capture")      cmdSetAutoCapture(cmd);
+    else if (name == "get_parcel_info")       cmdGetParcelInfo(cmd);
     else
     {
         sendError(name, "unknown_command");
@@ -133,29 +408,255 @@ void LLAICommands::dispatch(const LLSD& cmd)
 void LLAICommands::cmdMove(const LLSD& p)
 {
     std::string dir = p.has("dir") ? p["dir"].asString() : "";
-    if      (dir == "forward")  gAgent.moveAt(1);
-    else if (dir == "back")     gAgent.moveAt(-1);
-    else if (dir == "left")     gAgent.moveLeft(1);
-    else if (dir == "right")    gAgent.moveLeft(-1);
-    else if (dir == "up")       gAgent.moveUp(1);
-    else if (dir == "down")     gAgent.moveUp(-1);
+    LLAIState::instance().cancelTurn();
+    if      (dir == "forward" || dir == "back" || dir == "left" ||
+             dir == "right" || dir == "up" || dir == "down")
+    {
+        mMovePulse.active = false;
+        mMove.active = true;
+        mMove.dir = dir;
+        tickHeldMove();
+    }
     else if (dir == "stop")
     {
-        gAgent.clearControlFlags(
-            AGENT_CONTROL_AT_POS | AGENT_CONTROL_AT_NEG |
-            AGENT_CONTROL_LEFT_POS | AGENT_CONTROL_LEFT_NEG |
-            AGENT_CONTROL_UP_POS | AGENT_CONTROL_UP_NEG);
+        mMove.active = false;
+        mMove.dir.clear();
+        mMovePulse.active = false;
+        clear_movement_flags();
     }
     else { sendError("move", "invalid_dir"); return; }
     sendOk("move");
+}
+
+void LLAICommands::cmdMovePulse(const LLSD& p)
+{
+    std::string dir = p.has("dir") ? p["dir"].asString() : "";
+    if (dir != "forward" && dir != "back" && dir != "left" && dir != "right")
+    {
+        sendError("move_pulse", "invalid_dir");
+        return;
+    }
+    if (!gAgent.getRegion())
+    {
+        sendError("move_pulse", "no_region");
+        return;
+    }
+    if (mNav.active)
+    {
+        sendError("move_pulse", "navigation_active");
+        return;
+    }
+    if (mMovePulse.active)
+    {
+        sendError("move_pulse", "pulse_active");
+        return;
+    }
+
+    S32 frames = p.has("frames") ? (S32)p["frames"].asInteger() : 1;
+    frames = llclamp(frames, (S32)1, (S32)3);
+    S32 settle_frames = p.has("settle_frames") ? (S32)p["settle_frames"].asInteger() : 6;
+    settle_frames = llclamp(settle_frames, (S32)2, (S32)60);
+    F64 max_distance = p.has("max_distance_m") ? p["max_distance_m"].asReal() : 0.12;
+    max_distance = llclamp(max_distance, 0.02, 0.25);
+    F64 max_drop = p.has("max_drop_m") ? p["max_drop_m"].asReal() : 0.08;
+    max_drop = llclamp(max_drop, 0.01, 0.25);
+    F64 max_settle_velocity = p.has("max_settle_velocity_mps") ? p["max_settle_velocity_mps"].asReal() : 0.15;
+    max_settle_velocity = llclamp(max_settle_velocity, 0.01, 0.5);
+
+    LLAIState::instance().cancelTurn();
+    mMove.active = false;
+    mMove.dir.clear();
+    clear_movement_flags();
+
+    mMovePulse.active = true;
+    mMovePulse.started = false;
+    mMovePulse.dir = dir;
+    mMovePulse.id = p.has("id") ? p["id"].asString() : "";
+    mMovePulse.frames = frames;
+    mMovePulse.framesApplied = 0;
+    mMovePulse.stopFrames = 4;
+    mMovePulse.stopFramesApplied = 0;
+    mMovePulse.settleFrames = settle_frames;
+    mMovePulse.settleFramesApplied = 0;
+    mMovePulse.maxDistance = max_distance;
+    mMovePulse.maxDrop = max_drop;
+    mMovePulse.maxSettleVelocity = max_settle_velocity;
+    mMovePulse.failed = false;
+    mMovePulse.failReason.clear();
+    mMovePulse.startPos = gAgent.getPositionGlobal();
+    mMovePulse.startRegion = gAgent.getRegion()->getName();
+    mMovePulse.lastConsumedStateSeq = LLAIState::instance().getLastPublishedStateSeq();
+    sendOk("move_pulse");
+}
+
+void LLAICommands::tickHeldMove()
+{
+    if (!mMove.active)
+    {
+        return;
+    }
+
+    const std::string& dir = mMove.dir;
+    apply_move_dir(dir);
+}
+
+void LLAICommands::tickMovePulse()
+{
+    if (!mMovePulse.active)
+    {
+        return;
+    }
+
+    if (!gAgent.getRegion())
+    {
+        mMovePulse.active = false;
+        clear_movement_flags();
+        sendError("move_pulse", "no_region");
+        return;
+    }
+
+    if (!mMovePulse.started)
+    {
+        mMovePulse.started = true;
+        mMovePulse.startPos = gAgent.getPositionGlobal();
+        mMovePulse.startRegion = gAgent.getRegion()->getName();
+    }
+
+    if (mMovePulse.framesApplied < mMovePulse.frames)
+    {
+        if (!apply_move_pulse_dir(mMovePulse.dir))
+        {
+            mMovePulse.active = false;
+            clear_movement_flags();
+            sendError("move_pulse", "invalid_dir");
+        }
+        else
+        {
+            ++mMovePulse.framesApplied;
+        }
+        return;
+    }
+
+    if (mMovePulse.stopFramesApplied < mMovePulse.stopFrames)
+    {
+        apply_move_pulse_stop();
+        ++mMovePulse.stopFramesApplied;
+        return;
+    }
+
+    clear_movement_flags();
+    if (mMovePulse.settleFramesApplied < mMovePulse.settleFrames)
+    {
+        const U32 published_state_seq = LLAIState::instance().getLastPublishedStateSeq();
+        if (published_state_seq <= mMovePulse.lastConsumedStateSeq)
+        {
+            return;
+        }
+        LLSD state = LLAIState::instance().getLastPublishedState();
+        LLVector3d currentPos;
+        LLVector3 currentVel;
+        if (!llsd_to_vector3d(state["pos"], currentPos) || !llsd_to_vector3(state["vel"], currentVel))
+        {
+            return;
+        }
+        mMovePulse.lastConsumedStateSeq = published_state_seq;
+        LLVector3d currentDelta = currentPos - mMovePulse.startPos;
+        if (currentDelta.length() > mMovePulse.maxDistance)
+        {
+            mMovePulse.failed = true;
+            mMovePulse.failReason = "distance_limit_exceeded";
+            mMovePulse.settleFramesApplied = mMovePulse.settleFrames;
+        }
+        else if (-currentDelta.mdV[VZ] > mMovePulse.maxDrop)
+        {
+            mMovePulse.failed = true;
+            mMovePulse.failReason = "z_drop_limit_exceeded";
+            mMovePulse.settleFramesApplied = mMovePulse.settleFrames;
+        }
+        else if (mMovePulse.settleFramesApplied + 1 >= mMovePulse.settleFrames &&
+                 velocity_length(currentVel) > mMovePulse.maxSettleVelocity)
+        {
+            mMovePulse.failed = true;
+            mMovePulse.failReason = "velocity_not_settled";
+            mMovePulse.settleFramesApplied = mMovePulse.settleFrames;
+        }
+        else
+        {
+            ++mMovePulse.settleFramesApplied;
+            return;
+        }
+    }
+
+    clear_movement_flags();
+    if (mMovePulse.settleFramesApplied < mMovePulse.settleFrames)
+    {
+        ++mMovePulse.settleFramesApplied;
+        return;
+    }
+
+    LLSD final_state = LLAIState::instance().getLastPublishedState();
+    LLVector3d endPos = gAgent.getPositionGlobal();
+    LLVector3 vel = gAgent.getVelocity();
+    llsd_to_vector3d(final_state["pos"], endPos);
+    llsd_to_vector3(final_state["vel"], vel);
+    LLVector3d delta = endPos - mMovePulse.startPos;
+    const F64 final_velocity_mps = velocity_length(vel);
+    if (!mMovePulse.failed)
+    {
+        if (delta.length() > mMovePulse.maxDistance)
+        {
+            mMovePulse.failed = true;
+            mMovePulse.failReason = "distance_limit_exceeded";
+        }
+        else if (-delta.mdV[VZ] > mMovePulse.maxDrop)
+        {
+            mMovePulse.failed = true;
+            mMovePulse.failReason = "z_drop_limit_exceeded";
+        }
+        else if (final_velocity_mps > mMovePulse.maxSettleVelocity)
+        {
+            mMovePulse.failed = true;
+            mMovePulse.failReason = "velocity_not_settled";
+        }
+    }
+
+    LLSD ev;
+    ev["event"] = "move_pulse_complete";
+    ev["cmd"] = "move_pulse";
+    ev["ok"] = !mMovePulse.failed;
+    ev["reason"] = mMovePulse.failed ? mMovePulse.failReason : "stopped_confirmed";
+    ev["id"] = mMovePulse.id;
+    ev["dir"] = mMovePulse.dir;
+    ev["frames"] = (LLSD::Integer)mMovePulse.frames;
+    ev["frames_applied"] = (LLSD::Integer)mMovePulse.framesApplied;
+    ev["stop_frames"] = (LLSD::Integer)mMovePulse.stopFrames;
+    ev["stop_frames_applied"] = (LLSD::Integer)mMovePulse.stopFramesApplied;
+    ev["settle_frames"] = (LLSD::Integer)mMovePulse.settleFrames;
+    ev["settle_frames_applied"] = (LLSD::Integer)mMovePulse.settleFramesApplied;
+    ev["max_distance_m"] = mMovePulse.maxDistance;
+    ev["max_drop_m"] = mMovePulse.maxDrop;
+    ev["max_settle_velocity_mps"] = mMovePulse.maxSettleVelocity;
+    ev["start_pos"] = vector3d_to_array(mMovePulse.startPos);
+    ev["end_pos"] = vector3d_to_array(endPos);
+    ev["delta"] = vector3d_to_array(delta);
+    ev["distance_m"] = delta.length();
+    ev["z_delta_m"] = delta.mdV[VZ];
+    ev["velocity_mps"] = final_velocity_mps;
+    ev["region"] = final_state.has("region") ? final_state["region"] : LLSD(gAgent.getRegion()->getName());
+    ev["start_region"] = mMovePulse.startRegion;
+    ev["vel"] = vector3_to_array(vel);
+    ev["state_seq"] = (LLSD::Integer)mMovePulse.lastConsumedStateSeq;
+    LLAISocket::instance().sendEvent(ev);
+
+    mMovePulse.active = false;
 }
 
 void LLAICommands::cmdTurn(const LLSD& p)
 {
     if (!p.has("degrees")) { sendError("turn", "missing_degrees"); return; }
     F32 deg = (F32)p["degrees"].asReal();
-    // moveYaw takes radians/frame — call it once for a discrete nudge
-    gAgent.moveYaw(deg * DEG_TO_RAD);
+    const F32 target_heading = current_heading_deg() - deg;
+    LLAIState::instance().startTurnToHeading(target_heading, 1.5f);
     sendOk("turn");
 }
 
@@ -163,19 +664,58 @@ void LLAICommands::cmdFace(const LLSD& p)
 {
     if (!p.has("heading")) { sendError("face", "missing_heading"); return; }
     F32 targetDeg = (F32)p["heading"].asReal();
-
-    // Current heading
-    LLVector3 at = gAgent.getFrameAgent().getAtAxis();
-    F32 curDeg   = (F32)(std::atan2(at.mV[VX], at.mV[VY]) * RAD_TO_DEG);
-    if (curDeg < 0) curDeg += 360.f;
-
-    F32 delta = targetDeg - curDeg;
-    // Wrap to [-180, 180]
-    while (delta >  180.f) delta -= 360.f;
-    while (delta < -180.f) delta += 360.f;
-
-    gAgent.moveYaw(delta * DEG_TO_RAD);
+    F32 toleranceDeg = p.has("tolerance") ? (F32)p["tolerance"].asReal() : 2.0f;
+    LLAIState::instance().startTurnToHeading(targetDeg, toleranceDeg);
     sendOk("face");
+}
+
+void LLAICommands::cmdCameraLook(const LLSD& p)
+{
+    if (!p.has("heading")) { sendError("camera_look", "missing_heading"); return; }
+    if (!gAgent.getRegion()) { sendError("camera_look", "no_region"); return; }
+
+    F32 headingDeg = (F32)p["heading"].asReal();
+    while (headingDeg < 0.f) headingDeg += 360.f;
+    while (headingDeg >= 360.f) headingDeg -= 360.f;
+
+    const F32 pitchDeg = llmax(-60.f, llmin(45.f, p.has("pitch") ? (F32)p["pitch"].asReal() : -6.f));
+    const F32 distanceM = llmax(0.5f, llmin(12.f, p.has("distance_m") ? (F32)p["distance_m"].asReal() : 3.f));
+    const F32 focusDistanceM = llmax(0.75f, llmin(24.f, p.has("focus_distance_m") ? (F32)p["focus_distance_m"].asReal() : 4.f));
+
+    const F64 headingRad = (F64)headingDeg * DEG_TO_RAD;
+    const F64 pitchRad = (F64)pitchDeg * DEG_TO_RAD;
+    const F64 dirX = std::sin(headingRad);
+    const F64 dirY = std::cos(headingRad);
+    const F64 horiz = std::cos(pitchRad);
+    const F64 dirZ = std::sin(pitchRad);
+
+    LLVector3d eye = gAgent.getPositionGlobal();
+    eye.mdV[VZ] += 1.45;
+
+    LLVector3d focus(
+        eye.mdV[VX] + dirX * horiz * focusDistanceM,
+        eye.mdV[VY] + dirY * horiz * focusDistanceM,
+        eye.mdV[VZ] + dirZ * focusDistanceM);
+    LLVector3d camera(
+        eye.mdV[VX] - dirX * distanceM,
+        eye.mdV[VY] - dirY * distanceM,
+        eye.mdV[VZ] + 0.35);
+
+    gAgentCamera.setFocusOnAvatar(false, false, false);
+    gAgentCamera.setCameraPosAndFocusGlobal(camera, focus, LLUUID::null);
+
+    LLSD ev;
+    ev["event"] = "camera_look";
+    ev["cmd"] = "camera_look";
+    if (p.has("id")) ev["id"] = p["id"];
+    ev["heading"] = headingDeg;
+    ev["pitch"] = pitchDeg;
+    ev["distance_m"] = distanceM;
+    ev["focus_distance_m"] = focusDistanceM;
+    ev["camera_pos"] = vector3d_to_array(camera);
+    ev["focus"] = vector3d_to_array(focus);
+    LLAISocket::instance().sendEvent(ev);
+    sendOk("camera_look");
 }
 
 // ── communication ─────────────────────────────────────────────────────────────
@@ -195,7 +735,9 @@ void LLAICommands::cmdIM(const LLSD& p)
     LLUUID toId(p["to"].asString());
     if (toId.isNull()) { sendError("im", "invalid_uuid"); return; }
 
-    send_improved_im(toId, gAgent.getName(), p["text"].asString());
+    std::string my_name;
+    LLAgentUI::buildFullname(my_name);
+    send_improved_im(toId, my_name, p["text"].asString());
     sendOk("im");
 }
 
@@ -263,11 +805,13 @@ void LLAICommands::cmdScreenshot(const LLSD& p)
     if (!p.has("path")) { sendError("screenshot", "missing_path"); return; }
     S32 w = p.has("w") ? (S32)p["w"].asInteger() : 1280;
     S32 h = p.has("h") ? (S32)p["h"].asInteger() : 720;
+    const bool show_ui = p.has("show_ui") ? p["show_ui"].asBoolean() : false;
+    const bool show_hud = p.has("show_hud") ? p["show_hud"].asBoolean() : false;
 
     std::string path = p["path"].asString();
     bool ok = gViewerWindow->saveSnapshot(
         path, w, h,
-        /*show_ui*/false, /*show_hud*/false, /*do_rebuild*/false, /*show_balance*/false,
+        show_ui, show_hud, /*do_rebuild*/false, /*show_balance*/false,
         LLSnapshotModel::SNAPSHOT_TYPE_COLOR,
         LLSnapshotModel::SNAPSHOT_FORMAT_PNG);
 
@@ -282,6 +826,127 @@ void LLAICommands::cmdScreenshot(const LLSD& p)
     {
         sendError("screenshot", "save_failed");
     }
+}
+
+void LLAICommands::cmdCapturePerception(const LLSD& p)
+{
+    if (!p.has("path")) { sendError("capture_perception", "missing_path"); return; }
+
+    const S32 requested_w = p.has("w") ? (S32)p["w"].asInteger() : 1280;
+    const S32 requested_h = p.has("h") ? (S32)p["h"].asInteger() : 720;
+    const bool show_ui = p.has("show_ui") ? p["show_ui"].asBoolean() : true;
+    const bool show_hud = p.has("show_hud") ? p["show_hud"].asBoolean() : true;
+    const std::string path = p["path"].asString();
+
+    LLPointer<LLImageRaw> raw = new LLImageRaw();
+    bool ok = gViewerWindow->rawSnapshot(
+        raw,
+        requested_w,
+        requested_h,
+        true,
+        false,
+        show_ui,
+        show_hud,
+        false,
+        false,
+        false,
+        LLSnapshotModel::SNAPSHOT_TYPE_COLOR);
+    if (!ok || !save_png_image(raw, path))
+    {
+        sendError("capture_perception", "save_failed");
+        return;
+    }
+
+    const LLRect window_rect = gViewerWindow->getWindowRectRaw();
+    const LLRect world_rect = gViewerWindow->getWorldViewRectRaw();
+    const LLRect basis_rect = show_ui ? window_rect : world_rect;
+    const S32 image_width = raw->getWidth();
+    const S32 image_height = raw->getHeight();
+    const std::string focused_name =
+        (gFloaterView && gFloaterView->getFocusedFloater()) ? gFloaterView->getFocusedFloater()->getName() : std::string();
+
+    std::set<std::string> requested_regions;
+    collect_requested_regions(p.has("crop_regions") ? p["crop_regions"] : LLSD(), requested_regions);
+
+    struct RegionCandidate
+    {
+        std::string name;
+        LLRect source_rect;
+    };
+    std::vector<RegionCandidate> candidates;
+    candidates.push_back({"world_view", world_rect});
+
+    if (LLFloater* nearby_chat = LLFloaterReg::findInstance("nearby_chat"))
+    {
+        candidates.push_back({"nearby_chat", screen_rect_for_view(nearby_chat)});
+    }
+    if (LLFloaterMap* mini_map = LLFloaterReg::findTypedInstance<LLFloaterMap>("mini_map"))
+    {
+        LLNetMap* net_map = mini_map->findChild<LLNetMap>("Net Map", true);
+        candidates.push_back({"mini_map", net_map ? screen_rect_for_view(net_map) : screen_rect_for_view(mini_map)});
+    }
+    if (LLFloater* inventory = LLFloaterReg::findInstance("inventory"))
+    {
+        candidates.push_back({"inventory", screen_rect_for_view(inventory)});
+    }
+    if (gFloaterView)
+    {
+        if (LLFloater* focused = gFloaterView->getFocusedFloater())
+        {
+            candidates.push_back({"focused_floater", screen_rect_for_view(focused)});
+        }
+        if (LLFloater* frontmost = gFloaterView->getFrontmostClosableFloater())
+        {
+            candidates.push_back({"modal_dialog", screen_rect_for_view(frontmost)});
+        }
+    }
+
+    LLSD regions;
+    for (const RegionCandidate& candidate : candidates)
+    {
+        const LLRect image_rect = map_rect_to_image(candidate.source_rect, basis_rect, image_width, image_height);
+        if (!rect_is_valid(image_rect))
+        {
+            continue;
+        }
+
+        std::string crop_path;
+        bool crop_saved = false;
+        if (requested_regions.find(candidate.name) != requested_regions.end())
+        {
+            crop_path = replace_extension(path, "." + candidate.name);
+            crop_saved = crop_and_save_png(raw, image_rect, crop_path);
+        }
+        add_region_metadata(regions, candidate.name, candidate.source_rect, image_rect, crop_path, crop_saved);
+    }
+
+    LLSD state = LLAIState::instance().buildStateSnapshot();
+    LLSD ev;
+    ev["event"] = "perception_capture";
+    ev["path"] = path;
+    ev["width"] = image_width;
+    ev["height"] = image_height;
+    ev["show_ui"] = show_ui;
+    ev["show_hud"] = show_hud;
+    ev["capture_space"] = show_ui ? "window" : "world";
+    ev["window_rect"] = rect_to_llsd(window_rect);
+    ev["world_rect"] = rect_to_llsd(world_rect);
+    ev["capture_rect"] = rect_to_llsd(basis_rect);
+    ev["ui_regions"] = regions;
+    ev["focused_floater_name"] = focused_name;
+    ev["state"] = state;
+    ev["selection"] = state["selection"];
+    ev["hover"] = state["hover"];
+    ev["camera"] = state["camera"];
+    ev["last_pick"] = state["last_pick"];
+    ev["mouse"] = LLSD::emptyArray();
+    ev["mouse"][0] = gViewerWindow->getCurrentMouseX();
+    ev["mouse"][1] = gViewerWindow->getCurrentMouseY();
+    if (p.has("capture_id"))
+    {
+        ev["capture_id"] = p["capture_id"];
+    }
+    LLAISocket::instance().sendEvent(ev);
 }
 
 // ── query ─────────────────────────────────────────────────────────────────────
@@ -326,6 +991,14 @@ void LLAICommands::cmdDismissDialog(const LLSD& p)
     }
 }
 
+void LLAICommands::cmdSetAutoCapture(const LLSD& p)
+{
+    bool enabled = p.has("enabled") ? p["enabled"].asBoolean() : true;
+    float hz = p.has("hz") ? (float)p["hz"].asReal() : 1.5f;
+    LLAIState::instance().setAutoCaptureMode(enabled, hz);
+    sendOk("set_auto_capture");
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // ── get_objects ───────────────────────────────────────────────────────────────
@@ -352,12 +1025,29 @@ void LLAICommands::cmdGetObjects(const LLSD& p)
         F64 dist = (objPos - agentPos).length();
         if (dist > radius) continue;
 
+        LLNameValue* name_nv = obj->getNVPair("Name");
+        LLNameValue* desc_nv = obj->getNVPair("Description");
+        const std::string name = (name_nv && name_nv->getString()) ? name_nv->getString() : std::string();
+        const std::string desc = (desc_nv && desc_nv->getString()) ? desc_nv->getString() : std::string();
+        LLViewerObject* root = obj->getRootEdit();
+        const bool is_root = (root == obj);
+        LLVector3 scale = obj->getScale();
+
         LLSD entry;
         entry["id"]          = obj->getID().asString();
+        entry["local_id"]    = (LLSD::Integer)obj->getLocalID();
+        entry["name"]        = name;
+        entry["desc"]        = desc;
+        entry["parent_id"]   = (!is_root && root) ? root->getID().asString() : "";
+        entry["is_root"]     = is_root;
         entry["pos"]         = LLSD::emptyArray();
         entry["pos"][0]      = objPos.mdV[VX];
         entry["pos"][1]      = objPos.mdV[VY];
         entry["pos"][2]      = objPos.mdV[VZ];
+        entry["size"]        = LLSD::emptyArray();
+        entry["size"][0]     = scale.mV[VX];
+        entry["size"][1]     = scale.mV[VY];
+        entry["size"][2]     = scale.mV[VZ];
         entry["dist"]        = dist;
         entry["has_touch"]   = (bool)obj->flagHandleTouch();
         entry["click_action"]= (LLSD::Integer)obj->getClickAction();
@@ -443,6 +1133,8 @@ void LLAICommands::cmdNavigateTo(const LLSD& p)
     if (!p.has("x") || !p.has("y") || !p.has("z"))
     { sendError("navigate_to", "missing_coords"); return; }
 
+    mMove.active = false;
+    mMove.dir.clear();
     mNav.active     = true;
     mNav.stopDist   = p.has("stop_dist") ? (F32)p["stop_dist"].asReal() : 2.f;
     mNav.stuckCount = 0;
@@ -466,6 +1158,8 @@ void LLAICommands::cmdNavigateTo(const LLSD& p)
 
 void LLAICommands::cmdNavigateStop(const LLSD& /*p*/)
 {
+    mMove.active = false;
+    mMove.dir.clear();
     mNav.active = false;
     gAgent.clearControlFlags(
         AGENT_CONTROL_AT_POS | AGENT_CONTROL_AT_NEG |
@@ -547,6 +1241,50 @@ void LLAICommands::tickNavigation()
         mNav.lastPos      = curPos;
         mNav.lastMoveTime = now;
     }
+}
+
+// ── get_parcel_info ───────────────────────────────────────────────────────────
+
+void LLAICommands::cmdGetParcelInfo(const LLSD& cmd)
+{
+    LLViewerRegion* region = gAgent.getRegion();
+    LLParcel* parcel = LLViewerParcelMgr::instance().getAgentParcel();
+
+    LLSD ev;
+    ev["event"] = "parcel_info";
+    ev["cmd"]   = "get_parcel_info";
+
+    if (!parcel || !region)
+    {
+        ev["ok"]     = false;
+        ev["reason"] = "no_parcel";
+        LLAISocket::instance().sendEvent(ev);
+        return;
+    }
+
+    // Parcel identity
+    ev["ok"]          = true;
+    ev["parcel_name"] = parcel->getName();
+    ev["parcel_desc"] = parcel->getDesc();
+    ev["local_id"]    = (LLSD::Integer)parcel->getLocalID();
+
+    // AABB bounds in local region coordinates (metres from region origin)
+    const LLVector3& bmin = parcel->getAABBMin();
+    const LLVector3& bmax = parcel->getAABBMax();
+    ev["aabb_min_x"] = (LLSD::Real)bmin.mV[VX];
+    ev["aabb_min_y"] = (LLSD::Real)bmin.mV[VY];
+    ev["aabb_max_x"] = (LLSD::Real)bmax.mV[VX];
+    ev["aabb_max_y"] = (LLSD::Real)bmax.mV[VY];
+    ev["aabb_min_z"] = (LLSD::Real)bmin.mV[VZ];
+    ev["aabb_max_z"] = (LLSD::Real)bmax.mV[VZ];
+
+    // Region origin in global coords so controller can compute global parcel bounds
+    LLVector3d origin = region->getOriginGlobal();
+    ev["region_origin_x"] = (LLSD::Real)origin.mdV[VX];
+    ev["region_origin_y"] = (LLSD::Real)origin.mdV[VY];
+    ev["region_name"]     = region->getName();
+
+    LLAISocket::instance().sendEvent(ev);
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

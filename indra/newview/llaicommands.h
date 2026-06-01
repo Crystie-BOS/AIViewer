@@ -8,7 +8,7 @@
 
 #include "llsingleton.h"
 #include "llsd.h"
-#include "llvector3d.h"
+#include "v3dmath.h"
 #include <deque>
 #include <functional>
 
@@ -26,14 +26,18 @@ public:
 private:
     static void idleCB(void* data);
     void onIdle();
+    void tickHeldMove();
+    void tickMovePulse();
     void tickNavigation();
 
     void dispatch(const LLSD& cmd);
 
     // Command handlers
     void cmdMove(const LLSD& p);
+    void cmdMovePulse(const LLSD& p);
     void cmdTurn(const LLSD& p);
     void cmdFace(const LLSD& p);
+    void cmdCameraLook(const LLSD& p);
     void cmdChat(const LLSD& p);
     void cmdIM(const LLSD& p);
     void cmdTeleport(const LLSD& p);
@@ -41,6 +45,7 @@ private:
     void cmdSit(const LLSD& p);
     void cmdStand(const LLSD& p);
     void cmdScreenshot(const LLSD& p);
+    void cmdCapturePerception(const LLSD& p);
     void cmdGetState(const LLSD& p);
     void cmdGetNearby(const LLSD& p);
     void cmdGetObjects(const LLSD& p);
@@ -51,6 +56,8 @@ private:
     void cmdPause(const LLSD& p);
     void cmdResume(const LLSD& p);
     void cmdDismissDialog(const LLSD& p);
+    void cmdSetAutoCapture(const LLSD& p);
+    void cmdGetParcelInfo(const LLSD& p);
 
     void sendOk(const std::string& cmd);
     void sendError(const std::string& cmd, const std::string& reason);
@@ -59,6 +66,34 @@ private:
 
     // Deferred one-shot actions
     std::deque<std::function<void()>> mDeferred;
+
+    struct MoveState
+    {
+        bool active { false };
+        std::string dir;
+    } mMove;
+
+    struct MovePulseState
+    {
+        bool active { false };
+        bool started { false };
+        std::string dir;
+        std::string id;
+        S32 frames { 0 };
+        S32 framesApplied { 0 };
+        S32 stopFrames { 4 };
+        S32 stopFramesApplied { 0 };
+        S32 settleFrames { 0 };
+        S32 settleFramesApplied { 0 };
+        F64 maxDistance { 0.12 };
+        F64 maxDrop { 0.08 };
+        F64 maxSettleVelocity { 0.15 };
+        bool failed { false };
+        std::string failReason;
+        LLVector3d startPos;
+        std::string startRegion;
+        U32 lastConsumedStateSeq { 0 };
+    } mMovePulse;
 
     // Navigation state machine
     struct NavState
