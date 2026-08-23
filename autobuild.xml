@@ -909,7 +909,6 @@
         <key>name</key>
         <string>gstreamer</string>
       </map>
-      <!-- not used in Kokua
       <key>gtk-atk-pango-glib</key>
       <map>
         <key>platforms</key>
@@ -938,7 +937,6 @@
         <key>name</key>
         <string>gtk-atk-pango-glib</string>
       </map>
-      -->
       <key>havok-source</key>
       <map>
         <key>platforms</key>

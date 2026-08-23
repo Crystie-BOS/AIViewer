@@ -11,32 +11,21 @@ if (LINUX)
     target_link_libraries( ll::uilibraries INTERFACE CONAN_PKG::gtk )
     return()
   else()
-    include(FindPkgConfig)
-    pkg_check_modules(Gtk2 REQUIRED gtk+-2.0)
-    target_include_directories( ll::uilibraries SYSTEM INTERFACE ${Gtk2_INCLUDE_DIRS} )
-    target_link_directories( ll::uilibraries INTERFACE ${Gtk2_LIBRARY_DIRS} )
-    target_link_libraries( ll::uilibraries INTERFACE ${Gtk2_LIBRARIES} )
-    return()
+    set(LOCAL_DEV_ROOT "/home/crystie/AIViewer/local-dev-root" CACHE PATH
+        "Root of the locally extracted 64-bit Linux development packages")
+    set(_saved_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
+    set(_saved_pkg_config_sysroot "$ENV{PKG_CONFIG_SYSROOT_DIR}")
+    set(ENV{PKG_CONFIG_PATH}
+        "${LOCAL_DEV_ROOT}/usr/lib/x86_64-linux-gnu/pkgconfig:${LOCAL_DEV_ROOT}/usr/share/pkgconfig")
+    set(ENV{PKG_CONFIG_SYSROOT_DIR} "${LOCAL_DEV_ROOT}")
+
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK2 REQUIRED IMPORTED_TARGET gtk+-2.0)
+
+    set(ENV{PKG_CONFIG_PATH} "${_saved_pkg_config_path}")
+    set(ENV{PKG_CONFIG_SYSROOT_DIR} "${_saved_pkg_config_sysroot}")
+    target_link_libraries(ll::uilibraries INTERFACE PkgConfig::GTK2 ll::freetype)
   endif()
-  use_prebuilt_binary(gtk-atk-pango-glib)
-  
-  target_link_libraries( ll::uilibraries INTERFACE
-          atk-1.0
-          gdk-x11-2.0
-          gdk_pixbuf-2.0
-          Xinerama
-          glib-2.0
-          gmodule-2.0
-          gobject-2.0
-          gthread-2.0
-          gtk-x11-2.0
-          pango-1.0
-          pangoft2-1.0
-          pangox-1.0
-          pangoxft-1.0
-          Xinerama
-          ll::freetype
-          )
 endif (LINUX)
 if( WINDOWS )
   target_link_libraries( ll::uilibraries INTERFACE
@@ -58,4 +47,3 @@ endif()
 target_include_directories( ll::uilibraries SYSTEM INTERFACE
         ${LIBS_PREBUILT_DIR}/include
         )
-

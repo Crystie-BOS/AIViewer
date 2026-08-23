@@ -392,6 +392,7 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "pause")                 cmdPause(cmd);
     else if (name == "resume")                cmdResume(cmd);
     else if (name == "dismiss_dialog")        cmdDismissDialog(cmd);
+    else if (name == "respond_dialog")        cmdRespondDialog(cmd);
     else if (name == "set_auto_capture")      cmdSetAutoCapture(cmd);
     else if (name == "get_parcel_info")       cmdGetParcelInfo(cmd);
     else
@@ -681,6 +682,8 @@ void LLAICommands::cmdCameraLook(const LLSD& p)
     const F32 pitchDeg = llmax(-60.f, llmin(45.f, p.has("pitch") ? (F32)p["pitch"].asReal() : -6.f));
     const F32 distanceM = llmax(0.5f, llmin(12.f, p.has("distance_m") ? (F32)p["distance_m"].asReal() : 3.f));
     const F32 focusDistanceM = llmax(0.75f, llmin(24.f, p.has("focus_distance_m") ? (F32)p["focus_distance_m"].asReal() : 4.f));
+    const F32 focusZOffsetM = llmax(0.f, llmin(2.5f, p.has("focus_z_offset_m") ? (F32)p["focus_z_offset_m"].asReal() : 1.15f));
+    const F32 cameraForwardOffsetM = llmax(-1.0f, llmin(2.0f, p.has("camera_forward_offset_m") ? (F32)p["camera_forward_offset_m"].asReal() : -distanceM));
 
     const F64 headingRad = (F64)headingDeg * DEG_TO_RAD;
     const F64 pitchRad = (F64)pitchDeg * DEG_TO_RAD;
@@ -701,6 +704,18 @@ void LLAICommands::cmdCameraLook(const LLSD& p)
         eye.mdV[VY] - dirY * distanceM,
         eye.mdV[VZ] + 0.35);
 
+    LLVector3d focusLocal;
+    if (p.has("focus_position") && llsd_to_vector3d(p["focus_position"], focusLocal))
+    {
+        LLVector3d origin = gAgent.getRegion()->getOriginGlobal();
+        focus = origin + focusLocal;
+        focus.mdV[VZ] += focusZOffsetM;
+        camera = LLVector3d(
+            eye.mdV[VX] + dirX * cameraForwardOffsetM,
+            eye.mdV[VY] + dirY * cameraForwardOffsetM,
+            eye.mdV[VZ]);
+    }
+
     gAgentCamera.setFocusOnAvatar(false, false, false);
     gAgentCamera.setCameraPosAndFocusGlobal(camera, focus, LLUUID::null);
 
@@ -714,6 +729,7 @@ void LLAICommands::cmdCameraLook(const LLSD& p)
     ev["focus_distance_m"] = focusDistanceM;
     ev["camera_pos"] = vector3d_to_array(camera);
     ev["focus"] = vector3d_to_array(focus);
+    ev["target_aware"] = p.has("focus_position");
     LLAISocket::instance().sendEvent(ev);
     sendOk("camera_look");
 }
@@ -989,6 +1005,36 @@ void LLAICommands::cmdDismissDialog(const LLSD& p)
     {
         sendError("dismiss_dialog", "not_found");
     }
+}
+
+void LLAICommands::cmdRespondDialog(const LLSD& p)
+{
+    if (!p.has("id")) { sendError("respond_dialog", "missing_id"); return; }
+    LLUUID notifId(p["id"].asString());
+    LLNotificationPtr notif = LLNotifications::instance().find(notifId);
+    if (!notif)
+    {
+        sendError("respond_dialog", "not_found");
+        return;
+    }
+
+    std::string button = p.has("button") ? p["button"].asString() : "Yes";
+    if (button.empty())
+    {
+        button = "Yes";
+    }
+
+    LLSD response = notif->getResponseTemplate();
+    response[button] = true;
+    notif->respond(response);
+
+    LLSD ev;
+    ev["event"] = "dialog_responded";
+    ev["cmd"] = "respond_dialog";
+    ev["id"] = notifId.asString();
+    ev["button"] = button;
+    LLAISocket::instance().sendEvent(ev);
+    sendOk("respond_dialog");
 }
 
 void LLAICommands::cmdSetAutoCapture(const LLSD& p)

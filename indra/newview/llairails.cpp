@@ -21,6 +21,7 @@ LLAIRails::LLAIRails()
     mLimits["teleport"]  = 5;
     mLimits["teleport_landmark"] = 5;
     mLimits["screenshot"] = 20;
+    mLimits["set_environment"] = 6;
 }
 
 void LLAIRails::loadConfig()
