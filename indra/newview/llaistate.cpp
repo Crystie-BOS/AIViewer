@@ -14,7 +14,9 @@
 #include "llviewerwindow.h"
 #include "llselectmgr.h"
 #include "llviewerobject.h"
+#include "llviewerobjectlist.h"
 #include "llvoavatarself.h"
+#include "llvoavatar.h"
 #include "llworld.h"
 #include "llavatarnamecache.h"
 #include "llcallbacklist.h"
@@ -40,6 +42,24 @@ F32 normalize_heading_deg(F32 heading)
 F32 current_heading_deg()
 {
     LLVector3 at_axis = gAgent.getFrameAgent().getAtAxis();
+    return normalize_heading_deg((F32)(std::atan2(at_axis.mV[VX], at_axis.mV[VY]) * RAD_TO_DEG));
+}
+
+F32 avatar_heading_deg(const LLUUID& avatar_id)
+{
+    LLViewerObject* obj = gObjectList.findObject(avatar_id);
+    while (obj && obj->isAttachment())
+    {
+        obj = (LLViewerObject*)obj->getParent();
+    }
+
+    if (!obj || !obj->isAvatar())
+    {
+        return -1.f;
+    }
+
+    LLVOAvatar* avatar = (LLVOAvatar*)obj;
+    LLVector3 at_axis = avatar->getRenderRotation().getMatrix3().getFwdRow();
     return normalize_heading_deg((F32)(std::atan2(at_axis.mV[VX], at_axis.mV[VY]) * RAD_TO_DEG));
 }
 
@@ -379,6 +399,11 @@ void LLAIState::publishNearby()
         entry["pos"][1] = positions[i].mdV[VY];
         entry["pos"][2] = positions[i].mdV[VZ];
         entry["dist"] = dist;
+        F32 heading = avatar_heading_deg(ids[i]);
+        if (heading >= 0.f)
+        {
+            entry["heading"] = heading;
+        }
         ev["avatars"].append(entry);
     }
 
