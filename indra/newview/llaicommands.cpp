@@ -1058,18 +1058,27 @@ void LLAICommands::cmdGetObjects(const LLSD& p)
 
     LLSD ev;
     ev["event"]   = "nearby_objects";
+    ev["cmd"]     = "get_objects";
     ev["objects"] = LLSD::emptyArray();
+    ev["radius"]  = radius;
+    ev["agent_pos"] = vector3d_to_array(agentPos);
 
     S32 count = gObjectList.getNumObjects();
+    S32 dead_count = 0;
+    S32 avatar_count = 0;
+    S32 attachment_count = 0;
+    S32 outside_radius_count = 0;
+    S32 returned_count = 0;
     for (S32 i = 0; i < count; ++i)
     {
         LLViewerObject* obj = gObjectList.getObject(i);
-        if (!obj || obj->isDead() || obj->isAvatar()) continue;
-        if (obj->isAttachment()) continue; // skip attachments
+        if (!obj || obj->isDead()) { ++dead_count; continue; }
+        if (obj->isAvatar()) { ++avatar_count; continue; }
+        if (obj->isAttachment()) { ++attachment_count; continue; } // skip attachments
 
         LLVector3d objPos = obj->getPositionGlobal();
         F64 dist = (objPos - agentPos).length();
-        if (dist > radius) continue;
+        if (dist > radius) { ++outside_radius_count; continue; }
 
         LLNameValue* name_nv = obj->getNVPair("Name");
         LLNameValue* desc_nv = obj->getNVPair("Description");
@@ -1099,9 +1108,23 @@ void LLAICommands::cmdGetObjects(const LLSD& p)
         entry["click_action"]= (LLSD::Integer)obj->getClickAction();
         entry["pcode"]       = (LLSD::Integer)obj->getPCode();
         ev["objects"].append(entry);
+        ++returned_count;
     }
 
+    ev["total_object_count"] = count;
+    ev["returned_object_count"] = returned_count;
+    ev["dead_or_null_count"] = dead_count;
+    ev["avatar_count"] = avatar_count;
+    ev["attachment_count"] = attachment_count;
+    ev["outside_radius_count"] = outside_radius_count;
     LLAISocket::instance().sendEvent(ev);
+    LL_INFOS("AI") << "get_objects total=" << count
+                   << " returned=" << returned_count
+                   << " dead_or_null=" << dead_count
+                   << " avatars=" << avatar_count
+                   << " attachments=" << attachment_count
+                   << " outside_radius=" << outside_radius_count
+                   << " radius=" << radius << LL_ENDL;
 }
 
 // ── touch ─────────────────────────────────────────────────────────────────────

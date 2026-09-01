@@ -25,10 +25,33 @@ static constexpr const char* LOG_AI = "AI";
 #if LL_LINUX
 namespace
 {
-void writeSocketMessage(int fd, const std::string& msg)
+bool writeSocketMessage(int fd, const std::string& msg)
 {
-    const ssize_t written = ::write(fd, msg.c_str(), msg.size());
-    (void)written;
+    size_t offset = 0;
+    while (offset < msg.size())
+    {
+        const ssize_t written = ::send(
+            fd,
+            msg.data() + offset,
+            msg.size() - offset,
+            MSG_NOSIGNAL);
+        if (written > 0)
+        {
+            offset += static_cast<size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            struct pollfd writable{ fd, POLLOUT, 0 };
+            const int ready = ::poll(&writable, 1, 1000);
+            if (ready > 0 && (writable.revents & POLLOUT))
+                continue;
+        }
+        return false;
+    }
+    return true;
 }
 }
 #endif
