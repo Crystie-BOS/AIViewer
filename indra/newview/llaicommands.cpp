@@ -685,6 +685,16 @@ void LLAICommands::cmdCameraLook(const LLSD& p)
     const F32 focusZOffsetM = llmax(0.f, llmin(2.5f, p.has("focus_z_offset_m") ? (F32)p["focus_z_offset_m"].asReal() : 1.15f));
     const F32 cameraForwardOffsetM = llmax(-1.0f, llmin(2.0f, p.has("camera_forward_offset_m") ? (F32)p["camera_forward_offset_m"].asReal() : -distanceM));
 
+    if (p.has("fov_deg"))
+    {
+        // Widen (or restore) the camera's field of view before positioning it,
+        // so a single capture covers more of the surrounding scene -- closer to
+        // peripheral awareness than the default ~60 deg. Self-clamped to the
+        // viewer's own min/max view and RLV zoom limits by setDefaultFOV.
+        const F32 fovDeg = llmax(20.f, llmin(150.f, (F32)p["fov_deg"].asReal()));
+        LLViewerCamera::getInstance()->setDefaultFOV(fovDeg * DEG_TO_RAD);
+    }
+
     const F64 headingRad = (F64)headingDeg * DEG_TO_RAD;
     const F64 pitchRad = (F64)pitchDeg * DEG_TO_RAD;
     const F64 dirX = std::sin(headingRad);
@@ -730,6 +740,7 @@ void LLAICommands::cmdCameraLook(const LLSD& p)
     ev["camera_pos"] = vector3d_to_array(camera);
     ev["focus"] = vector3d_to_array(focus);
     ev["target_aware"] = p.has("focus_position");
+    ev["fov_deg"] = LLViewerCamera::getInstance()->getView() * RAD_TO_DEG;
     LLAISocket::instance().sendEvent(ev);
     sendOk("camera_look");
 }
