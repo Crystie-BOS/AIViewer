@@ -84,6 +84,7 @@ jobs:
           AUTOBUILD_VARIABLES_FILE: /opt/viewer-build-variables/variables
         run: |
           autobuild configure -A 64 -c ReleaseOS -- \
+            -DVIEWER_CHANNEL="Kokua AI Viewer" \
             -DCMAKE_VERBOSE_MAKEFILE:BOOL=FALSE \
             -DLL_TESTS:BOOL=OFF \
             -DPACKAGE:BOOL=FALSE \
@@ -92,6 +93,7 @@ jobs:
             -DUSE_KDU:BOOL=OFF \
             -DHAVOK_TPV:BOOL=OFF \
             -DHAVOK:BOOL=OFF \
+            -DUSE_TRACY:BOOL=OFF \
             -DRLV_ALWAYS_ON:BOOL=TRUE
 
       - name: Build
