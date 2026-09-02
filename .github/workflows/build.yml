@@ -85,6 +85,7 @@ jobs:
         run: |
           autobuild configure -A 64 -c ReleaseOS -- \
             -DVIEWER_CHANNEL="Kokua AI Viewer" \
+            -DLOCAL_DEV_ROOT="" \
             -DCMAKE_VERBOSE_MAKEFILE:BOOL=FALSE \
             -DLL_TESTS:BOOL=OFF \
             -DPACKAGE:BOOL=FALSE \
