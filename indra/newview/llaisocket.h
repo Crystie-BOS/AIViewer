@@ -42,12 +42,21 @@ private:
 #if LL_LINUX
     struct ClientConn
     {
-        int fd;
-        std::string readBuf; // partial line accumulator
+        int fd { -1 };
+        std::string readBuf;          // partial line accumulator
+        std::string outBuf;           // whole messages not yet taken by the socket
+        size_t      outOff { 0 };     // bytes of outBuf already sent
+        size_t      skippedFrames { 0 };
+        bool        overflow { false };
     };
 
     void socketThread();
-    void flushOutbound();         // writes mOutQueue to all clients (called inside thread)
+    // Queues mOutQueue for every client and writes what each socket will take
+    // without blocking (called inside thread). Clients that fail or fall
+    // hopelessly behind are closed and added to to_remove.
+    void flushOutbound(std::vector<int>& to_remove);
+    void queueForClient(ClientConn& c, const std::string& msg);
+    bool drainClient(ClientConn& c);
     void handleClientRead(ClientConn& c, std::vector<int>& to_remove);
     bool parseJsonLine(const std::string& line, LLSD& out);
 
