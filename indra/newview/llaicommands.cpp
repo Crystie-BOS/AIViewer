@@ -1030,6 +1030,31 @@ void LLAICommands::cmdRespondDialog(const LLSD& p)
     }
 
     std::string button = p.has("button") ? p["button"].asString() : "Yes";
+    // Or by position among the dialog's buttons (the "buttons" list in its
+    // dialog event): exact labels can carry padding no one can type.
+    if (p.has("index"))
+    {
+        S32 want = (S32)p["index"].asInteger();
+        S32 seen = 0;
+        bool found = false;
+        LLNotificationFormPtr form = notif->getForm();
+        for (S32 i = 0; form && i < form->getNumElements(); ++i)
+        {
+            LLSD el = form->getElement(i);
+            if (el["type"].asString() != "button") continue;
+            if (seen++ == want)
+            {
+                button = el["name"].asString();
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            sendError("respond_dialog", "bad_index");
+            return;
+        }
+    }
     if (button.empty())
     {
         button = "Yes";

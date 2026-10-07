@@ -95,6 +95,29 @@ bool LLAIEvents::onNotification(const LLSD& data)
     ev["id"]     = notif->getID().asString();
     ev["msg"]    = notif->getMessage();
 
+    // The buttons, in order, so the controller can read a menu and press one
+    // by its position -- a dance machine's or a teleport board's menu was
+    // only a title to her before: labels like "Female ||" could not be
+    // guessed (2026-10-03).
+    LLSD buttons = LLSD::emptyArray();
+    LLNotificationFormPtr form = notif->getForm();
+    if (form)
+    {
+        for (S32 i = 0; i < form->getNumElements(); ++i)
+        {
+            LLSD el = form->getElement(i);
+            if (el["type"].asString() != "button") continue;
+            LLSD b;
+            b["name"] = el["name"];
+            b["text"] = el.has("text") ? el["text"] : el["name"];
+            buttons.append(b);
+        }
+    }
+    ev["buttons"] = buttons;
+    const LLSD& payload = notif->getPayload();
+    if (payload.has("object_id")) ev["object_id"] = payload["object_id"];
+    if (payload.has("chat_channel")) ev["chat_channel"] = payload["chat_channel"];
+
     // Flag important categories
     if (type.find("ObjectGiveItem") != std::string::npos ||
         type.find("UserGiveItem") != std::string::npos)
