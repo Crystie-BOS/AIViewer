@@ -38,6 +38,7 @@ private:
     void cmdTurn(const LLSD& p);
     void cmdFace(const LLSD& p);
     void cmdCameraLook(const LLSD& p);
+    void cmdCameraPlace(const LLSD& p);
     void cmdChat(const LLSD& p);
     void cmdIM(const LLSD& p);
     void cmdTeleport(const LLSD& p);

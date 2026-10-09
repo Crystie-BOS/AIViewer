@@ -12,6 +12,7 @@
 #include "llagentui.h"
 #include "llagentcamera.h"
 #include "llviewercamera.h"
+#include "llviewercontrol.h"
 #include "llviewerwindow.h"
 #include "llviewerregion.h"
 #include "llviewerobjectlist.h"
@@ -374,6 +375,7 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "turn")                  cmdTurn(cmd);
     else if (name == "face")                  cmdFace(cmd);
     else if (name == "camera_look")           cmdCameraLook(cmd);
+    else if (name == "camera_place")          cmdCameraPlace(cmd);
     else if (name == "chat")                  cmdChat(cmd);
     else if (name == "im")                    cmdIM(cmd);
     else if (name == "teleport")              cmdTeleport(cmd);
@@ -743,6 +745,58 @@ void LLAICommands::cmdCameraLook(const LLSD& p)
     ev["fov_deg"] = LLViewerCamera::getInstance()->getView() * RAD_TO_DEG;
     LLAISocket::instance().sendEvent(ev);
     sendOk("camera_look");
+}
+
+// Camera at an exact point, looking at another: aerial photos of the region,
+// straight down from far above (camera_look is limited to 12 m and -60 deg,
+// for her own eye-level looks). Region-local metres; both points must lie in or
+// near her region, and the camera within 600 m of what it looks at.
+// Optional fov_deg and draw_distance_m (RenderFarClip, 64-512).
+void LLAICommands::cmdCameraPlace(const LLSD& p)
+{
+    if (!gAgent.getRegion()) { sendError("camera_place", "no_region"); return; }
+    LLVector3d camLocal, focusLocal;
+    if (!p.has("camera_position") || !llsd_to_vector3d(p["camera_position"], camLocal) ||
+        !p.has("focus_position") || !llsd_to_vector3d(p["focus_position"], focusLocal))
+    {
+        sendError("camera_place", "missing_positions");
+        return;
+    }
+    auto in_reach = [](const LLVector3d& v) {
+        return v.mdV[VX] >= -128.0 && v.mdV[VX] <= 384.0 && v.mdV[VY] >= -128.0 && v.mdV[VY] <= 384.0 &&
+               v.mdV[VZ] >= -10.0 && v.mdV[VZ] <= 4096.0;
+    };
+    if (!in_reach(camLocal) || !in_reach(focusLocal) || (camLocal - focusLocal).magVec() > 600.0)
+    {
+        sendError("camera_place", "out_of_reach");
+        return;
+    }
+    if (p.has("fov_deg"))
+    {
+        const F32 fovDeg = llmax(20.f, llmin(150.f, (F32)p["fov_deg"].asReal()));
+        LLViewerCamera::getInstance()->setDefaultFOV(fovDeg * DEG_TO_RAD);
+    }
+    if (p.has("draw_distance_m"))
+    {
+        const F32 far = llmax(64.f, llmin(512.f, (F32)p["draw_distance_m"].asReal()));
+        gSavedSettings.setF32("RenderFarClip", far);
+    }
+    LLVector3d origin = gAgent.getRegion()->getOriginGlobal();
+    LLVector3d camera = origin + camLocal;
+    LLVector3d focus = origin + focusLocal;
+    gAgentCamera.setFocusOnAvatar(false, false, false);
+    gAgentCamera.setCameraPosAndFocusGlobal(camera, focus, LLUUID::null);
+
+    LLSD ev;
+    ev["event"] = "camera_place";
+    ev["cmd"] = "camera_place";
+    if (p.has("id")) ev["id"] = p["id"];
+    ev["camera_pos"] = vector3d_to_array(camera);
+    ev["focus"] = vector3d_to_array(focus);
+    ev["fov_deg"] = LLViewerCamera::getInstance()->getView() * RAD_TO_DEG;
+    ev["draw_distance_m"] = gSavedSettings.getF32("RenderFarClip");
+    LLAISocket::instance().sendEvent(ev);
+    sendOk("camera_place");
 }
 
 // ── communication ─────────────────────────────────────────────────────────────
