@@ -1341,7 +1341,7 @@ void LLAICommands::tickNavigation()
     {
         // Arrived
         mNav.active = false;
-        gAgent.clearControlFlags(AGENT_CONTROL_AT_POS);
+        gAgent.clearControlFlags(AGENT_CONTROL_AT_POS | AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
         LLSD ev;
         ev["event"] = "navigate_ok";
         ev["pos"]   = LLSD::emptyArray();
@@ -1352,7 +1352,12 @@ void LLAICommands::tickNavigation()
         return;
     }
 
-    // Face the target
+    // Face the target. Headings here are compass degrees (clockwise from
+    // north, atan2(x, y)) but a positive yaw key turns counter-clockwise, so
+    // the key takes the opposite sign of the heading error -- as in
+    // LLAIState::updateTurnController. With the sign the same, every
+    // correction turned her further away until she settled facing straight
+    // away from the target and walked off backwards (2026-10-09).
     F32 targetDeg = (F32)(std::atan2(delta.mdV[VX], delta.mdV[VY]) * RAD_TO_DEG);
     LLVector3 at  = gAgent.getFrameAgent().getAtAxis();
     F32 curDeg    = (F32)(std::atan2(at.mV[VX], at.mV[VY]) * RAD_TO_DEG);
@@ -1360,10 +1365,16 @@ void LLAICommands::tickNavigation()
     while (yawDelta >  180.f) yawDelta -= 360.f;
     while (yawDelta < -180.f) yawDelta += 360.f;
 
+    gAgent.clearControlFlags(AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
     if (std::abs(yawDelta) > 5.f)
-        gAgent.moveYaw(yawDelta * DEG_TO_RAD * 0.1f);
+    {
+        const F32 yawKey = llclamp(std::abs(yawDelta) / 30.f, 0.15f, 1.f);
+        gAgent.moveYaw(yawDelta > 0.f ? -yawKey : yawKey);
+    }
 
-    gAgent.moveAt(1); // walk forward
+    // Turn mostly round before stepping off, rather than walking a wide arc.
+    if (std::abs(yawDelta) < 60.f)
+        gAgent.moveAt(1); // walk forward
 
     // Stuck detection: if position barely moved in 3 seconds
     F64 now = LLTimer::getElapsedSeconds();
@@ -1387,7 +1398,7 @@ void LLAICommands::tickNavigation()
             {
                 // Give up
                 mNav.active = false;
-                gAgent.clearControlFlags(AGENT_CONTROL_AT_POS);
+                gAgent.clearControlFlags(AGENT_CONTROL_AT_POS | AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
                 LLSD fail;
                 fail["event"]  = "navigate_failed";
                 fail["reason"] = "stuck";
