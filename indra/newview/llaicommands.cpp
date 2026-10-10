@@ -1315,6 +1315,16 @@ void LLAICommands::cmdNavigateTo(const LLSD& p)
     sendOk("navigate_to");
 }
 
+// Stop any navigation turn. moveYaw sets a yaw key that keeps turning her
+// after the key flags are cleared; without zeroing it she kept turning past
+// the target heading and orbited it, and the turn carried over into the
+// next walk (2026-10-10). LLAIState::cancelTurn does the same.
+static void stop_nav_turn()
+{
+    gAgent.clearControlFlags(AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
+    gAgentCamera.setYawKey(0.f);
+}
+
 void LLAICommands::cmdNavigateStop(const LLSD& /*p*/)
 {
     mMove.active = false;
@@ -1323,6 +1333,7 @@ void LLAICommands::cmdNavigateStop(const LLSD& /*p*/)
     gAgent.clearControlFlags(
         AGENT_CONTROL_AT_POS | AGENT_CONTROL_AT_NEG |
         AGENT_CONTROL_LEFT_POS | AGENT_CONTROL_LEFT_NEG);
+    stop_nav_turn();
     sendOk("navigate_stop");
 }
 
@@ -1341,7 +1352,8 @@ void LLAICommands::tickNavigation()
     {
         // Arrived
         mNav.active = false;
-        gAgent.clearControlFlags(AGENT_CONTROL_AT_POS | AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
+        gAgent.clearControlFlags(AGENT_CONTROL_AT_POS);
+        stop_nav_turn();
         LLSD ev;
         ev["event"] = "navigate_ok";
         ev["pos"]   = LLSD::emptyArray();
@@ -1365,11 +1377,15 @@ void LLAICommands::tickNavigation()
     while (yawDelta >  180.f) yawDelta -= 360.f;
     while (yawDelta < -180.f) yawDelta += 360.f;
 
-    gAgent.clearControlFlags(AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
     if (std::abs(yawDelta) > 5.f)
     {
         const F32 yawKey = llclamp(std::abs(yawDelta) / 30.f, 0.15f, 1.f);
+        gAgent.clearControlFlags(AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
         gAgent.moveYaw(yawDelta > 0.f ? -yawKey : yawKey);
+    }
+    else
+    {
+        stop_nav_turn(); // lined up: stop turning
     }
 
     // Turn mostly round before stepping off, rather than walking a wide arc.
@@ -1398,7 +1414,8 @@ void LLAICommands::tickNavigation()
             {
                 // Give up
                 mNav.active = false;
-                gAgent.clearControlFlags(AGENT_CONTROL_AT_POS | AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
+                gAgent.clearControlFlags(AGENT_CONTROL_AT_POS);
+                stop_nav_turn();
                 LLSD fail;
                 fail["event"]  = "navigate_failed";
                 fail["reason"] = "stuck";
