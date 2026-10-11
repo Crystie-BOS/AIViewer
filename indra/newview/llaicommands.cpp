@@ -1197,6 +1197,26 @@ void LLAICommands::cmdGetObjects(const LLSD& p)
         entry["has_touch"]   = (bool)obj->flagHandleTouch();
         entry["click_action"]= (LLSD::Integer)obj->getClickAction();
         entry["pcode"]       = (LLSD::Integer)obj->getPCode();
+        // Rotation in region frame, and where the object's local X and Y axes
+        // point: "size" is along those axes, so a road tile turned 90 deg or
+        // laid diagonally covers different ground than an axis-aligned box
+        // of the same size (her map put such roads on the grass, 2026-10-09).
+        const LLQuaternion rot = obj->getRotationRegion();
+        entry["rot"]         = LLSD::emptyArray();
+        entry["rot"][0]      = rot.mQ[VX];
+        entry["rot"][1]      = rot.mQ[VY];
+        entry["rot"][2]      = rot.mQ[VZ];
+        entry["rot"][3]      = rot.mQ[VW];
+        const LLVector3 xAxis = LLVector3::x_axis * rot;
+        const LLVector3 yAxis = LLVector3::y_axis * rot;
+        entry["x_axis"]      = LLSD::emptyArray();
+        entry["x_axis"][0]   = xAxis.mV[VX];
+        entry["x_axis"][1]   = xAxis.mV[VY];
+        entry["x_axis"][2]   = xAxis.mV[VZ];
+        entry["y_axis"]      = LLSD::emptyArray();
+        entry["y_axis"][0]   = yAxis.mV[VX];
+        entry["y_axis"][1]   = yAxis.mV[VY];
+        entry["y_axis"][2]   = yAxis.mV[VZ];
         ev["objects"].append(entry);
         ++returned_count;
     }
