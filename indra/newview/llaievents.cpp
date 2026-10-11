@@ -117,12 +117,20 @@ bool LLAIEvents::onNotification(const LLSD& data)
     const LLSD& payload = notif->getPayload();
     if (payload.has("object_id")) ev["object_id"] = payload["object_id"];
     if (payload.has("chat_channel")) ev["chat_channel"] = payload["chat_channel"];
+    // Who sent it, by avatar UUID: a teleport offer is only accepted from
+    // trusted people, and names are not identities (2026-10-11).
+    if (payload.has("from_id")) ev["from_id"] = payload["from_id"].asString();
+    if (payload.has("from_name")) ev["from_name"] = payload["from_name"];
 
     // Flag important categories
     if (type.find("ObjectGiveItem") != std::string::npos ||
         type.find("UserGiveItem") != std::string::npos)
     {
         ev["category"] = "inventory_offer";
+    }
+    else if (type.find("TeleportOffered") != std::string::npos)
+    {
+        ev["category"] = "teleport_offer";
     }
     else if (type.find("Permission") != std::string::npos ||
              type.find("ScriptQuestion") != std::string::npos)
