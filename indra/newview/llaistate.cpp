@@ -303,6 +303,11 @@ LLSD LLAIState::buildStateSnapshot() const
     ev["teleport_state"]  = tpState;
     ev["sitting"]         = sitting;
     ev["afk"]             = afk;
+    // Height of the sim's terrain (the land itself, not prims) under her, in
+    // region metres. Her map had no true ground: the floor of a 6 m hollow
+    // read as ground, so on the grass beside it she thought she was upstairs
+    // (2026-10-13). pos z well below this means she is under the ground.
+    ev["terrain_z"] = (LLSD::Real)LLWorld::getInstance()->resolveLandHeightGlobal(posGlobal);
     ev["camera"]["mode"] = camera_mode_name(gAgentCamera.getCameraMode());
     ev["camera"]["focus_on_avatar"] = gAgentCamera.getFocusOnAvatar();
     ev["camera"]["focus_global"] = vector3d_to_array(gAgentCamera.getFocusGlobal());
