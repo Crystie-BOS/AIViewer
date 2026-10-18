@@ -18,6 +18,7 @@
 #include "llvoavatarself.h"
 #include "llvoavatar.h"
 #include "llworld.h"
+#include "pipeline.h"
 #include "llavatarnamecache.h"
 #include "llcallbacklist.h"
 #include "llsd.h"
@@ -43,6 +44,68 @@ F32 current_heading_deg()
 {
     LLVector3 at_axis = gAgent.getFrameAgent().getAtAxis();
     return normalize_heading_deg((F32)(std::atan2(at_axis.mV[VX], at_axis.mV[VY]) * RAD_TO_DEG));
+}
+
+// Floor probes. Her eyes read open sky past a skybox edge as clear ground and
+// she walked off the polo field four times (2026-10-18); the bounding boxes of
+// its rock floor overhang the real edge. A ray straight down at a point ahead
+// meets the real surface -- a prim (invisible ones too: skyboxes use them as
+// floors) or the sim's terrain, whichever is higher. Avatars and anything worn
+// are passed through, so nobody's body reads as floor.
+const F32 FLOOR_PROBE_UP_M   = 0.3f;  // ray starts this far above her body centre
+const F32 FLOOR_PROBE_DOWN_M = 4.0f;  // ...and ends this far below it (~3 m under her feet)
+
+LLSD floor_probe(const LLVector3& body, F32 heading_deg, F32 dist_m)
+{
+    const F32 rad = heading_deg * DEG_TO_RAD;
+    const F32 px = body.mV[VX] + std::sin(rad) * dist_m;
+    const F32 py = body.mV[VY] + std::cos(rad) * dist_m;
+    F32 top = body.mV[VZ] + FLOOR_PROBE_UP_M;
+    const F32 bottom = body.mV[VZ] - FLOOR_PROBE_DOWN_M;
+
+    LLSD out;
+    out["d"] = dist_m;
+    F32 surface = bottom - 1.f;
+    std::string hit_id;
+    for (int i = 0; i < 4 && top > bottom; ++i)
+    {
+        LLVector4a start, end, hit;
+        start.set(px, py, top);
+        end.set(px, py, bottom);
+        S32 face = -1;
+        LLViewerObject* obj = gPipeline.lineSegmentIntersectInWorld(
+            start, end, true /*transparent*/, false /*rigged*/, true /*unselectable*/, false /*reflection probes*/,
+            &face, nullptr, nullptr, &hit);
+        if (!obj)
+        {
+            break;
+        }
+        LLViewerObject* root = obj;
+        while (root && root->isAttachment())
+        {
+            root = (LLViewerObject*)root->getParent();
+        }
+        if (obj->isAvatar() || obj->isAttachment() || (root && root->isAvatar()))
+        {
+            top = hit.getF32ptr()[2] - 0.05f;   // through the body; keep looking below it
+            continue;
+        }
+        surface = hit.getF32ptr()[2];
+        hit_id = obj->getID().asString();
+        break;
+    }
+    const F32 land = LLWorld::getInstance()->resolveLandHeightAgent(LLVector3(px, py, body.mV[VZ]));
+    if (land >= bottom && land <= body.mV[VZ] + FLOOR_PROBE_UP_M && land > surface)
+    {
+        surface = land;
+        hit_id = "land";
+    }
+    if (surface >= bottom)
+    {
+        out["z"] = surface;
+        out["what"] = hit_id;
+    }
+    return out;   // no "z": nothing within ~3 m below her feet
 }
 
 F32 avatar_heading_deg(const LLUUID& avatar_id)
@@ -308,6 +371,18 @@ LLSD LLAIState::buildStateSnapshot() const
     // read as ground, so on the grass beside it she thought she was upstairs
     // (2026-10-13). pos z well below this means she is under the ground.
     ev["terrain_z"] = (LLSD::Real)LLWorld::getInstance()->resolveLandHeightGlobal(posGlobal);
+    // The floor under her and 0.75 / 1.5 / 2.5 m ahead along her facing, in
+    // region metres (see floor_probe). The controller compares "ahead" with
+    // "here", so her body height does not matter.
+    {
+        const LLVector3 body = gAgent.getPositionAgent();
+        ev["floor"]["heading"] = headingDeg;
+        ev["floor"]["here"] = floor_probe(body, headingDeg, 0.f);
+        ev["floor"]["ahead"] = LLSD::emptyArray();
+        ev["floor"]["ahead"].append(floor_probe(body, headingDeg, 0.75f));
+        ev["floor"]["ahead"].append(floor_probe(body, headingDeg, 1.5f));
+        ev["floor"]["ahead"].append(floor_probe(body, headingDeg, 2.5f));
+    }
     ev["camera"]["mode"] = camera_mode_name(gAgentCamera.getCameraMode());
     ev["camera"]["focus_on_avatar"] = gAgentCamera.getFocusOnAvatar();
     ev["camera"]["focus_global"] = vector3d_to_array(gAgentCamera.getFocusGlobal());
