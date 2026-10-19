@@ -60,6 +60,12 @@ private:
     void cmdRespondDialog(const LLSD& p);
     void cmdSetAutoCapture(const LLSD& p);
     void cmdGetParcelInfo(const LLSD& p);
+    void cmdGetAttachments(const LLSD& p);
+    void cmdListInventory(const LLSD& p);
+    void cmdWearItem(const LLSD& p);
+    void cmdRemoveItem(const LLSD& p);
+    void cmdWearOutfit(const LLSD& p);
+    void cmdRezItem(const LLSD& p);
 
     void sendOk(const std::string& cmd);
     void sendError(const std::string& cmd, const std::string& reason);

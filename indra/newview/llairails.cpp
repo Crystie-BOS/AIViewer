@@ -22,6 +22,13 @@ LLAIRails::LLAIRails()
     mLimits["teleport_landmark"] = 5;
     mLimits["screenshot"] = 20;
     mLimits["set_environment"] = 6;
+    // Acting on things and on her outfit (2026-10-19): a runaway controller
+    // must not rez dozens of crops or keep changing her clothes.
+    mLimits["touch"]       = 30;
+    mLimits["rez_item"]    = 10;
+    mLimits["wear_item"]   = 20;
+    mLimits["remove_item"] = 20;
+    mLimits["wear_outfit"] = 6;
 }
 
 void LLAIRails::loadConfig()

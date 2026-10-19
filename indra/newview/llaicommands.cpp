@@ -33,6 +33,18 @@
 #include "indra_constants.h"
 #include "llviewerparcelmgr.h"
 #include "llparcel.h"
+#include "llvoavatarself.h"
+#include "llviewerjointattachment.h"
+#include "llinventorymodel.h"
+#include "llviewerinventory.h"
+#include "llinventoryfunctions.h"
+#include "llappearancemgr.h"
+#include "lltooldraganddrop.h"
+#include "llworld.h"
+#include "RRInterface.h"
+#include "message.h"
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <set>
@@ -397,6 +409,12 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "respond_dialog")        cmdRespondDialog(cmd);
     else if (name == "set_auto_capture")      cmdSetAutoCapture(cmd);
     else if (name == "get_parcel_info")       cmdGetParcelInfo(cmd);
+    else if (name == "get_attachments")       cmdGetAttachments(cmd);
+    else if (name == "list_inventory")        cmdListInventory(cmd);
+    else if (name == "wear_item")             cmdWearItem(cmd);
+    else if (name == "remove_item")           cmdRemoveItem(cmd);
+    else if (name == "wear_outfit")           cmdWearOutfit(cmd);
+    else if (name == "rez_item")              cmdRezItem(cmd);
     else
     {
         sendError(name, "unknown_command");
@@ -1272,9 +1290,30 @@ void LLAICommands::cmdTouch(const LLSD& p)
 
     if (!obj) { sendError("touch", "object_not_found"); return; }
 
-    // Build a minimal pick
+    // RestrainedLove: a script she wears may forbid touching this.
+    if (gRRenabled && !gAgent.mRRInterface.canTouch(obj))
+    {
+        sendError("touch", "rlv_blocked");
+        return;
+    }
+
+    // Build a minimal pick. A HUD or collar often tells its buttons apart by
+    // the face touched (the BOS Handler HUD: faces 0-3) or by where on it
+    // (llDetectedTouchST/UV), so those can be given (2026-10-19).
     LLPickInfo pick;
     pick.mObjectID = obj->getID();
+    if (p.has("face"))
+    {
+        pick.mObjectFace = (S32)p["face"].asInteger();
+    }
+    if (p.has("st") && p["st"].isArray() && p["st"].size() >= 2)
+    {
+        pick.mSTCoords = LLVector2((F32)p["st"][0].asReal(), (F32)p["st"][1].asReal());
+    }
+    if (p.has("uv") && p["uv"].isArray() && p["uv"].size() >= 2)
+    {
+        pick.mUVCoords = LLVector2((F32)p["uv"][0].asReal(), (F32)p["uv"][1].asReal());
+    }
 
     send_ObjectGrab_message(obj, pick, LLVector3::zero);
 
@@ -1288,6 +1327,285 @@ void LLAICommands::cmdTouch(const LLSD& p)
     LLSD ev;
     ev["event"] = "touch_ok";
     ev["id"]    = obj->getID().asString();
+    ev["face"]  = (LLSD::Integer)pick.mObjectFace;
+    LLAISocket::instance().sendEvent(ev);
+}
+
+// ── worn items ────────────────────────────────────────────────────────────────
+
+namespace
+{
+std::string lower_copy(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+// One worn object: its id, which attach point, HUD or not, its prims (link
+// order as the viewer holds them) with their face counts; for her own, the
+// inventory item and its name.
+LLSD describe_attachment(LLViewerObject* obj, LLViewerJointAttachment* point, bool self)
+{
+    LLSD a;
+    a["id"]    = obj->getID().asString();
+    a["point"] = point ? point->getName() : std::string();
+    a["hud"]   = point ? point->getIsHUDAttachment() : false;
+    if (self)
+    {
+        const LLUUID& item_id = obj->getAttachmentItemID();
+        a["item_id"] = item_id.asString();
+        if (LLViewerInventoryItem* item = gInventory.getItem(item_id))
+        {
+            a["name"] = item->getName();
+        }
+    }
+    a["links"] = LLSD::emptyArray();
+    LLSD root;
+    root["id"]    = obj->getID().asString();
+    root["link"]  = 1;
+    root["faces"] = (LLSD::Integer)obj->getNumTEs();
+    a["links"].append(root);
+    S32 link = 2;
+    for (const auto& child : obj->getChildren())
+    {
+        if (!child) continue;
+        LLSD c;
+        c["id"]    = child->getID().asString();
+        c["link"]  = link++;
+        c["faces"] = (LLSD::Integer)child->getNumTEs();
+        a["links"].append(c);
+    }
+    return a;
+}
+
+LLSD describe_avatar_attachments(LLVOAvatar* av, bool self, bool request_names)
+{
+    LLSD out;
+    out["id"]   = av->getID().asString();
+    out["self"] = self;
+    out["attachments"] = LLSD::emptyArray();
+    for (const auto& kv : av->mAttachmentPoints)
+    {
+        LLViewerJointAttachment* point = kv.second;
+        if (!point) continue;
+        for (const auto& objp : point->mAttachedObjects)
+        {
+            LLViewerObject* obj = objp.get();
+            if (!obj || obj->isDead()) continue;
+            out["attachments"].append(describe_attachment(obj, point, self));
+            if (!self && request_names)
+            {
+                // Names of other people's worn items come back as
+                // object_props events (llaievents.cpp onObjectProperties).
+                LLSelectMgr::instance().requestObjectPropertiesFamily(obj);
+            }
+        }
+    }
+    return out;
+}
+}
+
+void LLAICommands::cmdGetAttachments(const LLSD& p)
+{
+    if (!gAgentAvatarp.notNull()) { sendError("get_attachments", "no_avatar"); return; }
+    const bool names = p.has("names") ? p["names"].asBoolean() : true;
+    LLSD ev;
+    ev["event"]   = "attachments";
+    ev["avatars"] = LLSD::emptyArray();
+
+    if (p.has("avatar_id"))
+    {
+        LLUUID id(p["avatar_id"].asString());
+        LLViewerObject* obj = gObjectList.findObject(id);
+        if (id == gAgent.getID())
+        {
+            ev["avatars"].append(describe_avatar_attachments(gAgentAvatarp, true, names));
+        }
+        else if (obj && obj->isAvatar())
+        {
+            ev["avatars"].append(describe_avatar_attachments((LLVOAvatar*)obj, false, names));
+        }
+        else
+        {
+            sendError("get_attachments", "avatar_not_found");
+            return;
+        }
+    }
+    else
+    {
+        // Her own, plus everyone within radius (default 10 m).
+        ev["avatars"].append(describe_avatar_attachments(gAgentAvatarp, true, false));
+        const F32 radius = p.has("radius") ? (F32)p["radius"].asReal() : 10.f;
+        uuid_vec_t ids;
+        std::vector<LLVector3d> positions;
+        LLWorld::instance().getAvatars(&ids, &positions, gAgent.getPositionGlobal(), radius);
+        for (const LLUUID& id : ids)
+        {
+            if (id == gAgent.getID()) continue;
+            LLViewerObject* obj = gObjectList.findObject(id);
+            if (obj && obj->isAvatar())
+            {
+                ev["avatars"].append(describe_avatar_attachments((LLVOAvatar*)obj, false, names));
+            }
+        }
+    }
+    LLAISocket::instance().sendEvent(ev);
+}
+
+// ── inventory ─────────────────────────────────────────────────────────────────
+
+void LLAICommands::cmdListInventory(const LLSD& p)
+{
+    const std::string query  = lower_copy(p.has("query") ? p["query"].asString() : std::string());
+    const std::string folder = lower_copy(p.has("folder") ? p["folder"].asString() : std::string());
+    const bool worn_only = p.has("worn_only") && p["worn_only"].asBoolean();
+    const S32 limit = p.has("limit") ? (S32)p["limit"].asInteger() : 200;
+
+    LLInventoryModel::cat_array_t cats;
+    LLInventoryModel::item_array_t items;
+    gInventory.collectDescendents(gInventory.getRootFolderID(), cats, items, LLInventoryModel::EXCLUDE_TRASH);
+
+    LLSD ev;
+    ev["event"]   = "inventory";
+    ev["folders"] = LLSD::emptyArray();
+    ev["items"]   = LLSD::emptyArray();
+    if (!folder.empty())
+    {
+        for (const auto& cat : cats)
+        {
+            if (cat && lower_copy(cat->getName()).find(folder) != std::string::npos)
+            {
+                LLSD c;
+                c["id"]     = cat->getUUID().asString();
+                c["name"]   = cat->getName();
+                c["parent"] = cat->getParentUUID().asString();
+                ev["folders"].append(c);
+            }
+        }
+    }
+    S32 count = 0;
+    bool truncated = false;
+    for (const auto& item : items)
+    {
+        if (!item) continue;
+        if (!query.empty() && lower_copy(item->getName()).find(query) == std::string::npos) continue;
+        LLViewerInventoryCategory* parent = gInventory.getCategory(item->getParentUUID());
+        if (!folder.empty() && (!parent || lower_copy(parent->getName()).find(folder) == std::string::npos)) continue;
+        const bool worn = get_is_item_worn(item->getUUID());
+        if (worn_only && !worn) continue;
+        if (count >= limit) { truncated = true; break; }
+        LLSD i;
+        i["id"]     = item->getUUID().asString();
+        i["name"]   = item->getName();
+        i["type"]   = LLAssetType::lookup(item->getType());
+        i["folder"] = parent ? parent->getName() : std::string();
+        i["worn"]   = worn;
+        i["link"]   = item->getIsLinkType();
+        ev["items"].append(i);
+        ++count;
+    }
+    ev["truncated"] = truncated;
+    LLAISocket::instance().sendEvent(ev);
+}
+
+// ── wearing ───────────────────────────────────────────────────────────────────
+// Through LLAppearanceMgr, as the inventory panel's Wear / Add / Take Off do,
+// so RestrainedLove locks on her outfit apply just as they would to a person.
+
+void LLAICommands::cmdWearItem(const LLSD& p)
+{
+    if (!p.has("id")) { sendError("wear_item", "missing_id"); return; }
+    LLUUID id(p["id"].asString());
+    if (!gInventory.getItem(id)) { sendError("wear_item", "item_not_found"); return; }
+    const bool replace = p.has("replace") && p["replace"].asBoolean();
+    LLAppearanceMgr::instance().wearItemOnAvatar(id, true /*do_update*/, replace);
+    sendOk("wear_item");
+}
+
+void LLAICommands::cmdRemoveItem(const LLSD& p)
+{
+    if (!p.has("id")) { sendError("remove_item", "missing_id"); return; }
+    LLUUID id(p["id"].asString());
+    if (!gInventory.getItem(id)) { sendError("remove_item", "item_not_found"); return; }
+    LLAppearanceMgr::instance().removeItemFromAvatar(id);
+    sendOk("remove_item");
+}
+
+void LLAICommands::cmdWearOutfit(const LLSD& p)
+{
+    if (!p.has("folder_id")) { sendError("wear_outfit", "missing_folder_id"); return; }
+    LLViewerInventoryCategory* cat = gInventory.getCategory(LLUUID(p["folder_id"].asString()));
+    if (!cat) { sendError("wear_outfit", "folder_not_found"); return; }
+    const bool append = p.has("append") && p["append"].asBoolean();
+    LLAppearanceMgr::instance().wearInventoryCategory(cat, false /*copy*/, append);
+    sendOk("wear_outfit");
+}
+
+// ── rezzing ───────────────────────────────────────────────────────────────────
+// As dragging an object out of inventory onto the ground does
+// (LLToolDragAndDrop::dropObject), at a spot she names: region metres "pos",
+// or "ahead_m" in front of her (default 1.5 m). No-copy items leave her
+// inventory, exactly as they would for a person.
+
+void LLAICommands::cmdRezItem(const LLSD& p)
+{
+    if (!p.has("id")) { sendError("rez_item", "missing_id"); return; }
+    LLViewerInventoryItem* item = gInventory.getItem(LLUUID(p["id"].asString()));
+    if (!item || !item->isFinished()) { sendError("rez_item", "item_not_found"); return; }
+    if (item->getType() != LLAssetType::AT_OBJECT) { sendError("rez_item", "not_an_object"); return; }
+    if (gRRenabled && (gAgent.mRRInterface.mContainsRez || gAgent.mRRInterface.mContainsInteract))
+    {
+        sendError("rez_item", "rlv_blocked");
+        return;
+    }
+    LLViewerRegion* region = gAgent.getRegion();
+    if (!region) { sendError("rez_item", "no_region"); return; }
+
+    LLVector3 target;
+    if (p.has("pos") && p["pos"].isArray() && p["pos"].size() >= 3)
+    {
+        target.set((F32)p["pos"][0].asReal(), (F32)p["pos"][1].asReal(), (F32)p["pos"][2].asReal());
+    }
+    else
+    {
+        const F32 ahead = p.has("ahead_m") ? (F32)p["ahead_m"].asReal() : 1.5f;
+        LLVector3 at = gAgent.getFrameAgent().getAtAxis();
+        at.mV[VZ] = 0.f;
+        at.normVec();
+        target = gAgent.getPositionAgent() + at * ahead;
+    }
+
+    const bool remove_from_inventory = !item->getPermissions().allowCopyBy(gAgent.getID());
+
+    LLMessageSystem* msg = gMessageSystem;
+    msg->newMessageFast(_PREHASH_RezObject);
+    msg->nextBlockFast(_PREHASH_AgentData);
+    msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
+    msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
+    msg->addUUIDFast(_PREHASH_GroupID, gAgent.getGroupID());
+    msg->nextBlock("RezData");
+    msg->addUUIDFast(_PREHASH_FromTaskID, LLUUID::null);
+    msg->addU8Fast(_PREHASH_BypassRaycast, (U8)1);
+    msg->addVector3Fast(_PREHASH_RayStart, target + LLVector3(0.f, 0.f, 1.f));
+    msg->addVector3Fast(_PREHASH_RayEnd, target);
+    msg->addUUIDFast(_PREHASH_RayTargetID, LLUUID::null);
+    msg->addBOOLFast(_PREHASH_RayEndIsIntersection, false);
+    msg->addBOOLFast(_PREHASH_RezSelected, false);
+    msg->addBOOLFast(_PREHASH_RemoveItem, remove_from_inventory);
+    pack_permissions_slam(msg, item->getFlags(), item->getPermissions());
+    msg->nextBlockFast(_PREHASH_InventoryData);
+    item->packMessage(msg);
+    msg->sendReliable(region->getHost());
+
+    LLSD ev;
+    ev["event"]   = "rez_sent";
+    ev["id"]      = item->getUUID().asString();
+    ev["name"]    = item->getName();
+    ev["pos"]     = LLSD::emptyArray();
+    ev["pos"][0]  = target.mV[VX];
+    ev["pos"][1]  = target.mV[VY];
+    ev["pos"][2]  = target.mV[VZ];
+    ev["removed_from_inventory"] = remove_from_inventory;
     LLAISocket::instance().sendEvent(ev);
 }
 
