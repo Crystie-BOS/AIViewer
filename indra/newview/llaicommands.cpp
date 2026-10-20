@@ -42,6 +42,8 @@
 #include "lltooldraganddrop.h"
 #include "llworld.h"
 #include "pipeline.h"
+#include "llimview.h"
+#include "llavatarnamecache.h"
 #include "RRInterface.h"
 #include "message.h"
 #include <algorithm>
@@ -948,9 +950,17 @@ void LLAICommands::cmdIM(const LLSD& p)
     LLUUID toId(p["to"].asString());
     if (toId.isNull()) { sendError("im", "invalid_uuid"); return; }
 
-    std::string my_name;
-    LLAgentUI::buildFullname(my_name);
-    send_improved_im(toId, my_name, p["text"].asString());
+    // Sent the way her own chat window sends, so her conversation shows her
+    // side too: send_improved_im went straight to the server, and on VNC her
+    // window showed only the other person's lines (2026-10-20).
+    const LLUUID session_id = LLIMMgr::computeSessionID(IM_NOTHING_SPECIAL, toId);
+    if (gIMMgr && !LLIMModel::getInstance()->findIMSession(session_id))
+    {
+        LLAvatarName av_name;
+        const std::string name = LLAvatarNameCache::get(toId, &av_name) ? av_name.getCompleteName() : toId.asString();
+        gIMMgr->addSession(name, IM_NOTHING_SPECIAL, toId);
+    }
+    LLIMModel::sendMessage(p["text"].asString(), session_id, toId, IM_NOTHING_SPECIAL);
     sendOk("im");
 }
 
