@@ -407,6 +407,8 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "get_nearby")            cmdGetNearby(cmd);
     else if (name == "get_objects")           cmdGetObjects(cmd);
     else if (name == "touch")                 cmdTouch(cmd);
+    else if (name == "pick_at")               cmdPickAt(cmd);
+    else if (name == "click_at")              cmdClickAt(cmd);
     else if (name == "request_object_props")  cmdRequestObjectProps(cmd);
     else if (name == "navigate_to")           cmdNavigateTo(cmd);
     else if (name == "navigate_stop")         cmdNavigateStop(cmd);
@@ -1452,6 +1454,132 @@ void LLAICommands::cmdTouch(const LLSD& p)
     ev["event"] = "touch_ok";
     ev["id"]    = obj->getID().asString();
     ev["face"]  = (LLSD::Integer)pick.mObjectFace;
+    LLAISocket::instance().sendEvent(ev);
+}
+
+// ── pick_at / click_at ────────────────────────────────────────────────────────
+//
+// What a mouse does (Crystie, 2026-10-20: "this is a real viewer, why is this hard?"). touch needs an id
+// or a name, and a worn item has neither the viewer can look up, so a spanker on someone's butt could not
+// be reached. These work from where a thing is on screen instead:
+//
+//   pick_at  {nx, ny}  what is under that point -- object, root, face, avatar it is worn by. No side effects.
+//   click_at {nx, ny}  the same pick, then a real touch: the grab carries the face, UV/ST and hit position
+//                      a script reads (a hit-box, a HUD button), which touch-by-id leaves empty.
+//
+// The point is nx,ny in 0..1 over the world view (0,0 = top-left, as in a world_view screenshot), or x,y
+// in pixels of the world view from its top-left. Options: transparent (default false: pick invisible
+// hit-boxes too), rigged (default true: pick rigged mesh, i.e. body attachments).
+
+namespace
+{
+bool ai_pick_point(const LLSD& p, S32& out_x, S32& out_y_from_bot)
+{
+    const LLRect wr = gViewerWindow->getWorldViewRectScaled();
+    if (wr.getWidth() <= 1 || wr.getHeight() <= 1) return false;
+    if (p.has("nx") && p.has("ny"))
+    {
+        const F64 nx = llclamp(p["nx"].asReal(), 0.0, 1.0);
+        const F64 ny = llclamp(p["ny"].asReal(), 0.0, 1.0);
+        out_x = wr.mLeft + (S32)(nx * (wr.getWidth() - 1));
+        out_y_from_bot = wr.mTop - (S32)(ny * (wr.getHeight() - 1));
+        return true;
+    }
+    if (p.has("x") && p.has("y"))
+    {
+        out_x = wr.mLeft + (S32)p["x"].asInteger();
+        out_y_from_bot = wr.mTop - (S32)p["y"].asInteger();
+        return true;
+    }
+    return false;
+}
+
+LLSD ai_describe_pick(const LLPickInfo& pick)
+{
+    LLSD d;
+    d["valid"]     = pick.isValid();
+    d["pick_type"] = (LLSD::Integer)pick.mPickType;
+    d["face"]      = (LLSD::Integer)pick.mObjectFace;
+    d["intersection"] = LLSD::emptyArray();
+    for (int i = 0; i < 3; ++i) d["intersection"].append((LLSD::Real)pick.mIntersection.mV[i]);
+    d["uv"] = LLSD::emptyArray();
+    d["uv"].append((LLSD::Real)pick.mUVCoords.mV[0]);
+    d["uv"].append((LLSD::Real)pick.mUVCoords.mV[1]);
+    d["st"] = LLSD::emptyArray();
+    d["st"].append((LLSD::Real)pick.mSTCoords.mV[0]);
+    d["st"].append((LLSD::Real)pick.mSTCoords.mV[1]);
+
+    LLViewerObject* obj = pick.getObject().get();
+    if (obj)
+    {
+        d["object_id"] = obj->getID().asString();
+        LLViewerObject* root = obj->getRootEdit();
+        d["root_id"]        = root ? root->getID().asString() : obj->getID().asString();
+        d["is_avatar"]      = obj->isAvatar();
+        d["is_attachment"]  = obj->isAttachment();
+        d["handles_touch"]  = obj->flagHandleTouch() || (root && root->flagHandleTouch());
+        if (obj->isAvatar())
+        {
+            d["avatar_id"] = obj->getID().asString();
+        }
+        else if (obj->isAttachment() && obj->getAvatar())
+        {
+            d["avatar_id"] = obj->getAvatar()->getID().asString();
+        }
+    }
+    return d;
+}
+}
+
+void LLAICommands::cmdPickAt(const LLSD& p)
+{
+    S32 x = 0, y = 0;
+    if (!ai_pick_point(p, x, y)) { sendError("pick_at", "missing_point"); return; }
+    const bool transparent = p.has("transparent") && p["transparent"].asBoolean();
+    const bool rigged      = !p.has("rigged") || p["rigged"].asBoolean();
+    LLPickInfo pick = gViewerWindow->pickImmediate(x, y, transparent, rigged, false, true, false);
+    LLSD ev = ai_describe_pick(pick);
+    ev["event"] = "pick_result";
+    LLAISocket::instance().sendEvent(ev);
+}
+
+void LLAICommands::cmdClickAt(const LLSD& p)
+{
+    S32 x = 0, y = 0;
+    if (!ai_pick_point(p, x, y)) { sendError("click_at", "missing_point"); return; }
+    const bool transparent = p.has("transparent") && p["transparent"].asBoolean();
+    const bool rigged      = !p.has("rigged") || p["rigged"].asBoolean();
+    LLPickInfo pick = gViewerWindow->pickImmediate(x, y, transparent, rigged, false, true, false);
+    LLViewerObject* obj = pick.getObject().get();
+    if (!pick.isValid() || !obj) { sendError("click_at", "nothing_picked"); return; }
+    if (obj->isAvatar())
+    {
+        // The skin itself: there is no script to touch. Say who, so the caller can aim at the attachment.
+        LLSD ev = ai_describe_pick(pick);
+        ev["event"]  = "error";
+        ev["cmd"]    = "click_at";
+        ev["reason"] = "picked_avatar";
+        LLAISocket::instance().sendEvent(ev);
+        return;
+    }
+
+    // RestrainedLove: a script she wears may forbid touching this.
+    if (gRRenabled && !gAgent.mRRInterface.canTouch(obj, pick.mIntersection))
+    {
+        sendError("click_at", "rlv_blocked");
+        return;
+    }
+
+    send_ObjectGrab_message(obj, pick, LLVector3::zero);
+
+    LLUUID objId = obj->getID();
+    deferOnce([objId, pick]() mutable {
+        LLViewerObject* o = gObjectList.findObject(objId);
+        if (o) send_ObjectDeGrab_message(o, pick);
+    });
+
+    LLSD ev = ai_describe_pick(pick);
+    ev["event"] = "click_ok";
     LLAISocket::instance().sendEvent(ev);
 }
 

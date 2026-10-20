@@ -53,6 +53,8 @@ private:
     void cmdGetNearby(const LLSD& p);
     void cmdGetObjects(const LLSD& p);
     void cmdTouch(const LLSD& p);
+    void cmdPickAt(const LLSD& p);
+    void cmdClickAt(const LLSD& p);
     void cmdRequestObjectProps(const LLSD& p);
     void cmdNavigateTo(const LLSD& p);
     void cmdNavigateStop(const LLSD& p);
