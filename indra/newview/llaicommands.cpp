@@ -41,6 +41,7 @@
 #include "llappearancemgr.h"
 #include "lltooldraganddrop.h"
 #include "llworld.h"
+#include "pipeline.h"
 #include "RRInterface.h"
 #include "message.h"
 #include <algorithm>
@@ -351,6 +352,9 @@ void LLAICommands::onIdle()
     // Tick navigation state machine
     tickNavigation();
 
+    // Keep the camera behind her when following
+    tickFollowCamera();
+
     // Drain incoming commands
     LLSD cmd;
     while (LLAISocket::instance().pollCommand(cmd))
@@ -388,6 +392,7 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "face")                  cmdFace(cmd);
     else if (name == "camera_look")           cmdCameraLook(cmd);
     else if (name == "camera_place")          cmdCameraPlace(cmd);
+    else if (name == "camera_follow")         cmdCameraFollow(cmd);
     else if (name == "chat")                  cmdChat(cmd);
     else if (name == "im")                    cmdIM(cmd);
     else if (name == "teleport")              cmdTeleport(cmd);
@@ -690,10 +695,57 @@ void LLAICommands::cmdFace(const LLSD& p)
     sendOk("face");
 }
 
+// The camera is set with no collision of its own: 2-3 m behind her it sat
+// behind TP signs, inside trees and under bridges (2026-10-20). Pull it in to
+// just short of the first solid thing between her eyes and where it would go.
+// Avatars, attachments and see-through prims (fog, glass) do not count.
+static LLVector3d pull_camera_in(const LLVector3d& eye, const LLVector3d& camera)
+{
+    const LLVector3 eye_agent = gAgent.getPosAgentFromGlobal(eye);
+    const LLVector3 cam_agent = gAgent.getPosAgentFromGlobal(camera);
+    LLVector4a start, end, hit;
+    start.load3(eye_agent.mV);
+    end.load3(cam_agent.mV);
+    S32 face = -1;
+    LLViewerObject* obj = gPipeline.lineSegmentIntersectInWorld(
+        start, end, false /*transparent*/, false /*rigged*/, true /*unselectable*/, false /*reflection probes*/,
+        &face, nullptr, nullptr, &hit);
+    LLVector3 stop = cam_agent;
+    bool blocked = false;
+    if (obj)
+    {
+        LLViewerObject* root = obj;
+        while (root && root->isAttachment())
+        {
+            root = (LLViewerObject*)root->getParent();
+        }
+        if (!(obj->isAvatar() || obj->isAttachment() || (root && root->isAvatar())))
+        {
+            stop = LLVector3(hit.getF32ptr());
+            blocked = true;
+        }
+    }
+    // The land itself (hillsides behind her)
+    const F32 land = LLWorld::getInstance()->resolveLandHeightAgent(stop);
+    if (stop.mV[VZ] < land + 0.3f)
+    {
+        stop.mV[VZ] = land + 0.3f;
+    }
+    if (!blocked)
+    {
+        return gAgent.getPosGlobalFromAgent(stop);
+    }
+    LLVector3 back = eye_agent - stop;
+    const F32 len = back.normVec();
+    const F32 keep = llmin(0.25f, len);
+    return gAgent.getPosGlobalFromAgent(stop + back * keep);
+}
+
 void LLAICommands::cmdCameraLook(const LLSD& p)
 {
     if (!p.has("heading")) { sendError("camera_look", "missing_heading"); return; }
     if (!gAgent.getRegion()) { sendError("camera_look", "no_region"); return; }
+    mFollowCam.active = false;
 
     F32 headingDeg = (F32)p["heading"].asReal();
     while (headingDeg < 0.f) headingDeg += 360.f;
@@ -734,6 +786,8 @@ void LLAICommands::cmdCameraLook(const LLSD& p)
         eye.mdV[VY] - dirY * distanceM,
         eye.mdV[VZ] + 0.35);
 
+    camera = pull_camera_in(eye, camera);
+
     LLVector3d focusLocal;
     if (p.has("focus_position") && llsd_to_vector3d(p["focus_position"], focusLocal))
     {
@@ -770,9 +824,69 @@ void LLAICommands::cmdCameraLook(const LLSD& p)
 // for her own eye-level looks). Region-local metres; both points must lie in or
 // near her region, and the camera within 600 m of what it looks at.
 // Optional fov_deg and draw_distance_m (RenderFarClip, 64-512).
+void LLAICommands::cmdCameraFollow(const LLSD& p)
+{
+    if (!gAgent.getRegion()) { sendError("camera_follow", "no_region"); return; }
+    const bool on = p.has("on") ? p["on"].asBoolean() : true;
+    mFollowCam.active = on;
+    mFollowCam.hasLast = false;
+    if (on)
+    {
+        mFollowCam.distance = llmax(0.5f, llmin(6.f, p.has("distance_m") ? (F32)p["distance_m"].asReal() : 2.5f));
+        mFollowCam.pitch = llmax(-60.f, llmin(30.f, p.has("pitch") ? (F32)p["pitch"].asReal() : -8.f));
+        mFollowCam.focusDist = llmax(1.f, llmin(24.f, p.has("focus_distance_m") ? (F32)p["focus_distance_m"].asReal() : 6.f));
+        tickFollowCamera();
+    }
+    LLSD ev;
+    ev["event"] = "camera_follow";
+    ev["cmd"] = "camera_follow";
+    if (p.has("id")) ev["id"] = p["id"];
+    ev["on"] = on;
+    LLAISocket::instance().sendEvent(ev);
+    sendOk("camera_follow");
+}
+
+void LLAICommands::tickFollowCamera()
+{
+    if (!mFollowCam.active || !gAgent.getRegion())
+    {
+        return;
+    }
+    LLVector3 at = gAgent.getFrameAgent().getAtAxis();
+    at.mV[VZ] = 0.f;
+    if (at.normVec() < 0.01f)
+    {
+        return;
+    }
+    const F64 pitchRad = (F64)mFollowCam.pitch * DEG_TO_RAD;
+    LLVector3d eye = gAgent.getPositionGlobal();
+    eye.mdV[VZ] += 1.45;
+    const LLVector3d dir(at.mV[VX], at.mV[VY], 0.0);
+    LLVector3d focus = eye + dir * (std::cos(pitchRad) * mFollowCam.focusDist);
+    focus.mdV[VZ] += std::sin(pitchRad) * mFollowCam.focusDist;
+    LLVector3d want = eye - dir * mFollowCam.distance;
+    want.mdV[VZ] += 0.35;
+    want = pull_camera_in(eye, want);
+    // Ease along as she turns; snap when pulled in, so it never passes through.
+    LLVector3d cam = want;
+    if (mFollowCam.hasLast)
+    {
+        const LLVector3d eased = mFollowCam.lastCam + (want - mFollowCam.lastCam) * 0.2;
+        if ((eased - eye).magVec() <= (want - eye).magVec() + 0.05)
+        {
+            cam = eased;
+        }
+    }
+    mFollowCam.lastCam = cam;
+    mFollowCam.hasLast = true;
+    gAgentCamera.setFocusOnAvatar(false, false, false);
+    gAgentCamera.setCameraPosAndFocusGlobal(cam, focus, LLUUID::null);
+}
+
 void LLAICommands::cmdCameraPlace(const LLSD& p)
 {
     if (!gAgent.getRegion()) { sendError("camera_place", "no_region"); return; }
+    mFollowCam.active = false;
     LLVector3d camLocal, focusLocal;
     if (!p.has("camera_position") || !llsd_to_vector3d(p["camera_position"], camLocal) ||
         !p.has("focus_position") || !llsd_to_vector3d(p["focus_position"], focusLocal))

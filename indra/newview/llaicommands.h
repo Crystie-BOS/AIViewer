@@ -39,6 +39,8 @@ private:
     void cmdFace(const LLSD& p);
     void cmdCameraLook(const LLSD& p);
     void cmdCameraPlace(const LLSD& p);
+    void cmdCameraFollow(const LLSD& p);
+    void tickFollowCamera();
     void cmdChat(const LLSD& p);
     void cmdIM(const LLSD& p);
     void cmdTeleport(const LLSD& p);
@@ -102,6 +104,18 @@ private:
         std::string startRegion;
         U32 lastConsumedStateSeq { 0 };
     } mMovePulse;
+
+    // Her eyes go with her (camera_follow): each frame the camera sits behind
+    // her head, pulled in front of anything solid between it and her.
+    struct FollowCamState
+    {
+        bool       active    { false };
+        F32        distance  { 2.5f };
+        F32        pitch     { -8.f };
+        F32        focusDist { 6.f };
+        bool       hasLast   { false };
+        LLVector3d lastCam;
+    } mFollowCam;
 
     // Navigation state machine
     struct NavState
