@@ -99,7 +99,9 @@ LLSD whisker(const LLVector3& body, F32 heading_deg, F32 rel_deg, F32 above_feet
         const bool body_part = obj->isAvatar() || obj->isAttachment() || (root && root->isAvatar());
         LLViewerObject* top = obj->getRootEdit() ? obj->getRootEdit() : obj;
         const bool walk_through = obj->flagPhantom() || top->flagPhantom();
-        const bool ground_rising = normal.getF32ptr()[2] > 0.6f;
+        // Ground rising only if gentler than ~37 degrees: at 0.6 (~53) rock
+        // faces passed for ground and she walked up rocks (2026-10-21).
+        const bool ground_rising = normal.getF32ptr()[2] > 0.8f;
         if (body_part || walk_through || ground_rising)
         {
             from = dist + 0.05f;   // look on past it
@@ -443,9 +445,11 @@ LLSD LLAIState::buildStateSnapshot() const
         // "d": metres to the first solid thing (absent if none within range),
         // "id": its root object}.
         ev["whiskers"] = LLSD::emptyArray();
-        for (F32 rel : {-25.f, 0.f, 25.f})
+        // Seven directions at three heights: fence rails and posts slipped
+        // between three rays at two heights (2026-10-21).
+        for (F32 rel : {-40.f, -25.f, -12.f, 0.f, 12.f, 25.f, 40.f})
         {
-            for (F32 h : {0.5f, 1.2f})
+            for (F32 h : {0.3f, 0.7f, 1.2f})
             {
                 ev["whiskers"].append(whisker(body, headingDeg, rel, h));
             }
