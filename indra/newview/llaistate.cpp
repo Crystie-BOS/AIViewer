@@ -55,6 +55,63 @@ F32 current_heading_deg()
 const F32 FLOOR_PROBE_UP_M   = 0.3f;  // ray starts this far above her body centre
 const F32 FLOOR_PROBE_DOWN_M = 4.0f;  // ...and ends this far below it (~3 m under her feet)
 
+// Whiskers (2026-10-21): what is solid in front of her, every tick. She ran
+// into poles, fences, rock edges and glass that the object list does not give
+// a size for (or does not list at all, a building's own mesh): 153 object
+// stops and 75 stalls in 14 h. A level ray at knee and at chest height, along
+// her facing and 25 degrees either side, out to WHISKER_RANGE_M. Not avatars
+// or attachments, not phantom things (fog, grass), and not a walkable slope
+// (a surface facing mostly up is ground rising, not a wall).
+const F32 WHISKER_RANGE_M = 4.0f;
+const F32 WHISKER_START_M = 0.3f;      // clear of her own body
+const F32 BODY_ABOVE_FEET_M = 1.0f;    // her position is her body, about this far above her feet
+
+LLSD whisker(const LLVector3& body, F32 heading_deg, F32 rel_deg, F32 above_feet_m)
+{
+    const F32 rad = (heading_deg + rel_deg) * DEG_TO_RAD;
+    const F32 sx = std::sin(rad), sy = std::cos(rad);
+    const F32 z = body.mV[VZ] - BODY_ABOVE_FEET_M + above_feet_m;
+    LLSD out;
+    out["a"] = rel_deg;
+    out["h"] = above_feet_m;
+    F32 from = WHISKER_START_M;
+    for (int i = 0; i < 3 && from < WHISKER_RANGE_M; ++i)
+    {
+        LLVector4a start, end, hit, normal;
+        start.set(body.mV[VX] + sx * from, body.mV[VY] + sy * from, z);
+        end.set(body.mV[VX] + sx * WHISKER_RANGE_M, body.mV[VY] + sy * WHISKER_RANGE_M, z);
+        S32 face = -1;
+        LLViewerObject* obj = gPipeline.lineSegmentIntersectInWorld(
+            start, end, false /*transparent*/, false /*rigged*/, true /*unselectable*/, false /*reflection probes*/,
+            &face, nullptr, nullptr, &hit, nullptr, &normal);
+        if (!obj)
+        {
+            break;
+        }
+        const F32 hx = hit.getF32ptr()[0] - body.mV[VX];
+        const F32 hy = hit.getF32ptr()[1] - body.mV[VY];
+        const F32 dist = std::sqrt(hx * hx + hy * hy);
+        LLViewerObject* root = obj;
+        while (root && root->isAttachment())
+        {
+            root = (LLViewerObject*)root->getParent();
+        }
+        const bool body_part = obj->isAvatar() || obj->isAttachment() || (root && root->isAvatar());
+        LLViewerObject* top = obj->getRootEdit() ? obj->getRootEdit() : obj;
+        const bool walk_through = obj->flagPhantom() || top->flagPhantom();
+        const bool ground_rising = normal.getF32ptr()[2] > 0.6f;
+        if (body_part || walk_through || ground_rising)
+        {
+            from = dist + 0.05f;   // look on past it
+            continue;
+        }
+        out["d"] = dist;
+        out["id"] = top->getID().asString();
+        break;
+    }
+    return out;
+}
+
 LLSD floor_probe(const LLVector3& body, F32 heading_deg, F32 dist_m)
 {
     const F32 rad = heading_deg * DEG_TO_RAD;
@@ -382,6 +439,17 @@ LLSD LLAIState::buildStateSnapshot() const
         ev["floor"]["ahead"].append(floor_probe(body, headingDeg, 0.75f));
         ev["floor"]["ahead"].append(floor_probe(body, headingDeg, 1.5f));
         ev["floor"]["ahead"].append(floor_probe(body, headingDeg, 2.5f));
+        // Whiskers: {"a": angle off her facing, "h": height above her feet,
+        // "d": metres to the first solid thing (absent if none within range),
+        // "id": its root object}.
+        ev["whiskers"] = LLSD::emptyArray();
+        for (F32 rel : {-25.f, 0.f, 25.f})
+        {
+            for (F32 h : {0.5f, 1.2f})
+            {
+                ev["whiskers"].append(whisker(body, headingDeg, rel, h));
+            }
+        }
     }
     ev["camera"]["mode"] = camera_mode_name(gAgentCamera.getCameraMode());
     ev["camera"]["focus_on_avatar"] = gAgentCamera.getFocusOnAvatar();
