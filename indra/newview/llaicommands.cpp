@@ -1633,6 +1633,18 @@ void ai_add_touchable(LLSD& items, LLViewerObject* o, LLViewerObject* root, cons
     d["own_touch"]     = own;
     d["handles_touch"] = own || (root && root->flagHandleTouch());
     d["faces"]         = (LLSD::Integer)o->getNumTEs();
+    // Where it sits inside its parent (for a HUD, the layout of its buttons) and how big: a HUD prim has no useful
+    // world or screen position, so the layout is read from these (2026-10-22).
+    {
+        const LLVector3 lp = o->getPosition();
+        const LLVector3 sc = o->getScale();
+        const LLQuaternion lr = o->getRotation();
+        d["lpos"]  = LLSD::emptyArray();
+        d["scale"] = LLSD::emptyArray();
+        d["lrot"]  = LLSD::emptyArray();
+        for (int i = 0; i < 3; ++i) { d["lpos"].append((LLSD::Real)lp.mV[i]); d["scale"].append((LLSD::Real)sc.mV[i]); }
+        for (int i = 0; i < 4; ++i) d["lrot"].append((LLSD::Real)lr.mQ[i]);
+    }
     F64 nx = 0.0, ny = 0.0;
     const bool on = ai_screen_of(o, nx, ny);
     d["on_screen"] = on;
