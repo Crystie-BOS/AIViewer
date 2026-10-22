@@ -49,6 +49,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <memory>
+#include "lltimer.h"
 #include <cstring>
 #include <set>
 #include <vector>
@@ -345,6 +347,12 @@ void LLAICommands::onIdle()
         mDeferred.pop_front();
         fn();
     }
+    for (size_t n = mTimed.size(); n > 0; --n)
+    {
+        auto fn = mTimed.front();
+        mTimed.pop_front();
+        if (!fn()) mTimed.push_back(std::move(fn));
+    }
 
     // Reapply held movement each idle frame so manual move commands behave as
     // continuous controls rather than one-frame nudges.
@@ -407,6 +415,10 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "get_nearby")            cmdGetNearby(cmd);
     else if (name == "get_objects")           cmdGetObjects(cmd);
     else if (name == "touch")                 cmdTouch(cmd);
+    else if (name == "pick_at")               cmdPickAt(cmd);
+    else if (name == "click_at")              cmdClickAt(cmd);
+    else if (name == "touchables")            cmdTouchables(cmd);
+    else if (name == "click_object")          cmdClickObject(cmd);
     else if (name == "request_object_props")  cmdRequestObjectProps(cmd);
     else if (name == "navigate_to")           cmdNavigateTo(cmd);
     else if (name == "navigate_stop")         cmdNavigateStop(cmd);
@@ -1451,6 +1463,283 @@ void LLAICommands::cmdTouch(const LLSD& p)
     LLSD ev;
     ev["event"] = "touch_ok";
     ev["id"]    = obj->getID().asString();
+    ev["face"]  = (LLSD::Integer)pick.mObjectFace;
+    LLAISocket::instance().sendEvent(ev);
+}
+
+// ── pick_at / click_at ────────────────────────────────────────────────────────
+//
+// What a mouse does (Crystie, 2026-10-20: "this is a real viewer, why is this hard?"). touch needs an id
+// or a name, and a worn item has neither the viewer can look up, so a spanker on someone's butt could not
+// be reached. These work from where a thing is on screen instead:
+//
+//   pick_at  {nx, ny}  what is under that point -- object, root, face, avatar it is worn by. No side effects.
+//   click_at {nx, ny}  the same pick, then a real touch: the grab carries the face, UV/ST and hit position
+//                      a script reads (a hit-box, a HUD button), which touch-by-id leaves empty.
+//
+// The point is nx,ny in 0..1 over the world view (0,0 = top-left, as in a world_view screenshot), or x,y
+// in pixels of the world view from its top-left. Options: transparent (default false: pick invisible
+// hit-boxes too), rigged (default true: pick rigged mesh, i.e. body attachments).
+
+namespace
+{
+bool ai_pick_point(const LLSD& p, S32& out_x, S32& out_y_from_bot)
+{
+    const LLRect wr = gViewerWindow->getWorldViewRectScaled();
+    if (wr.getWidth() <= 1 || wr.getHeight() <= 1) return false;
+    if (p.has("nx") && p.has("ny"))
+    {
+        const F64 nx = llclamp(p["nx"].asReal(), 0.0, 1.0);
+        const F64 ny = llclamp(p["ny"].asReal(), 0.0, 1.0);
+        out_x = wr.mLeft + (S32)(nx * (wr.getWidth() - 1));
+        out_y_from_bot = wr.mTop - (S32)(ny * (wr.getHeight() - 1));
+        return true;
+    }
+    if (p.has("x") && p.has("y"))
+    {
+        out_x = wr.mLeft + (S32)p["x"].asInteger();
+        out_y_from_bot = wr.mTop - (S32)p["y"].asInteger();
+        return true;
+    }
+    return false;
+}
+
+LLSD ai_describe_pick(const LLPickInfo& pick)
+{
+    LLSD d;
+    d["valid"]     = pick.isValid();
+    d["pick_type"] = (LLSD::Integer)pick.mPickType;
+    d["face"]      = (LLSD::Integer)pick.mObjectFace;
+    d["intersection"] = LLSD::emptyArray();
+    for (int i = 0; i < 3; ++i) d["intersection"].append((LLSD::Real)pick.mIntersection.mV[i]);
+    d["uv"] = LLSD::emptyArray();
+    d["uv"].append((LLSD::Real)pick.mUVCoords.mV[0]);
+    d["uv"].append((LLSD::Real)pick.mUVCoords.mV[1]);
+    d["st"] = LLSD::emptyArray();
+    d["st"].append((LLSD::Real)pick.mSTCoords.mV[0]);
+    d["st"].append((LLSD::Real)pick.mSTCoords.mV[1]);
+
+    LLViewerObject* obj = pick.getObject().get();
+    if (obj)
+    {
+        d["object_id"] = obj->getID().asString();
+        LLViewerObject* root = obj->getRootEdit();
+        d["root_id"]        = root ? root->getID().asString() : obj->getID().asString();
+        d["is_avatar"]      = obj->isAvatar();
+        d["is_attachment"]  = obj->isAttachment();
+        d["handles_touch"]  = obj->flagHandleTouch() || (root && root->flagHandleTouch());
+        if (obj->isAvatar())
+        {
+            d["avatar_id"] = obj->getID().asString();
+        }
+        else if (obj->isAttachment() && obj->getAvatar())
+        {
+            d["avatar_id"] = obj->getAvatar()->getID().asString();
+        }
+    }
+    return d;
+}
+}
+
+void LLAICommands::cmdPickAt(const LLSD& p)
+{
+    S32 x = 0, y = 0;
+    if (!ai_pick_point(p, x, y)) { sendError("pick_at", "missing_point"); return; }
+    const bool transparent = p.has("transparent") && p["transparent"].asBoolean();
+    const bool rigged      = !p.has("rigged") || p["rigged"].asBoolean();
+    LLPickInfo pick = gViewerWindow->pickImmediate(x, y, transparent, rigged, false, true, false);
+    LLSD ev = ai_describe_pick(pick);
+    ev["event"] = "pick_result";
+    LLAISocket::instance().sendEvent(ev);
+}
+
+void LLAICommands::cmdClickAt(const LLSD& p)
+{
+    S32 x = 0, y = 0;
+    if (!ai_pick_point(p, x, y)) { sendError("click_at", "missing_point"); return; }
+    const bool transparent = p.has("transparent") && p["transparent"].asBoolean();
+    const bool rigged      = !p.has("rigged") || p["rigged"].asBoolean();
+    LLPickInfo pick = gViewerWindow->pickImmediate(x, y, transparent, rigged, false, true, false);
+    LLViewerObject* obj = pick.getObject().get();
+    if (!pick.isValid() || !obj) { sendError("click_at", "nothing_picked"); return; }
+    if (obj->isAvatar())
+    {
+        // The skin itself: there is no script to touch. Say who, so the caller can aim at the attachment.
+        LLSD ev = ai_describe_pick(pick);
+        ev["event"]  = "error";
+        ev["cmd"]    = "click_at";
+        ev["reason"] = "picked_avatar";
+        LLAISocket::instance().sendEvent(ev);
+        return;
+    }
+
+    // RestrainedLove: a script she wears may forbid touching this.
+    if (gRRenabled && !gAgent.mRRInterface.canTouch(obj, pick.mIntersection))
+    {
+        sendError("click_at", "rlv_blocked");
+        return;
+    }
+
+    send_ObjectGrab_message(obj, pick, LLVector3::zero);
+
+    LLUUID objId = obj->getID();
+    const F32 hold_ms = p.has("hold_ms") ? (F32)p["hold_ms"].asReal() : 120.f;
+    auto timer = std::make_shared<LLTimer>();
+    deferTimed([objId, pick, timer, hold_ms]() mutable {
+        if (timer->getElapsedTimeF32() * 1000.f < hold_ms) return false;
+        LLViewerObject* o = gObjectList.findObject(objId);
+        if (o) send_ObjectDeGrab_message(o, pick);
+        return true;
+    });
+
+    LLSD ev = ai_describe_pick(pick);
+    ev["event"] = "click_ok";
+    LLAISocket::instance().sendEvent(ev);
+}
+
+// ── touchables / click_object ─────────────────────────────────────────────────
+//
+// touchables {avatar_id}: every worn prim of that avatar that takes touch (or is a root), with where it is on screen
+//   as nx,ny over the world view (the same convention as pick_at/click_at), so a caller can tell the spanker from the
+//   body mesh that happens to lie over it.
+// click_object {id, hold_ms}: click that one object. If it can be picked at its on-screen centre the grab carries the
+//   real face/UV/hit position; otherwise it is the minimal grab touch uses. The press is held for hold_ms (default 150).
+
+namespace
+{
+bool ai_screen_of(LLViewerObject* o, F64& nx, F64& ny)
+{
+    const LLRect wr = gViewerWindow->getWorldViewRectScaled();
+    if (!o || wr.getWidth() <= 1 || wr.getHeight() <= 1) return false;
+    LLCoordGL pt;
+    const bool on = LLViewerCamera::getInstance()->projectPosAgentToScreen(o->getPositionAgent(), pt, false);
+    nx = (F64)(pt.mX - wr.mLeft) / (F64)(wr.getWidth() - 1);
+    ny = (F64)(wr.mTop - pt.mY) / (F64)(wr.getHeight() - 1);
+    return on && nx >= 0.0 && nx <= 1.0 && ny >= 0.0 && ny <= 1.0;
+}
+
+void ai_add_touchable(LLSD& items, LLViewerObject* o, LLViewerObject* root, const std::string& point, bool hud, S32 link)
+{
+    if (!o || o->isDead()) return;
+    const bool own = o->flagHandleTouch();
+    const bool is_root = (o == root);
+    if (!own && !is_root) return;
+    LLSD d;
+    d["id"]            = o->getID().asString();
+    d["root_id"]       = root ? root->getID().asString() : o->getID().asString();
+    d["link"]          = (LLSD::Integer)link;
+    d["point"]         = point;
+    d["hud"]           = hud;
+    d["own_touch"]     = own;
+    d["handles_touch"] = own || (root && root->flagHandleTouch());
+    d["faces"]         = (LLSD::Integer)o->getNumTEs();
+    // Where it sits inside its parent (for a HUD, the layout of its buttons) and how big: a HUD prim has no useful
+    // world or screen position, so the layout is read from these (2026-10-22).
+    {
+        const LLVector3 lp = o->getPosition();
+        const LLVector3 sc = o->getScale();
+        const LLQuaternion lr = o->getRotation();
+        d["lpos"]  = LLSD::emptyArray();
+        d["scale"] = LLSD::emptyArray();
+        d["lrot"]  = LLSD::emptyArray();
+        for (int i = 0; i < 3; ++i) { d["lpos"].append((LLSD::Real)lp.mV[i]); d["scale"].append((LLSD::Real)sc.mV[i]); }
+        for (int i = 0; i < 4; ++i) d["lrot"].append((LLSD::Real)lr.mQ[i]);
+    }
+    F64 nx = 0.0, ny = 0.0;
+    const bool on = ai_screen_of(o, nx, ny);
+    d["on_screen"] = on;
+    d["nx"] = nx;
+    d["ny"] = ny;
+    items.append(d);
+}
+}
+
+void LLAICommands::cmdTouchables(const LLSD& p)
+{
+    LLViewerObject* o = p.has("avatar_id") ? gObjectList.findObject(LLUUID(p["avatar_id"].asString())) : nullptr;
+    if (!o || !o->isAvatar()) { sendError("touchables", "avatar_not_found"); return; }
+    LLVOAvatar* av = (LLVOAvatar*)o;
+    LLSD ev;
+    ev["event"]     = "touchables";
+    ev["avatar_id"] = av->getID().asString();
+    ev["items"]     = LLSD::emptyArray();
+    for (const auto& kv : av->mAttachmentPoints)
+    {
+        LLViewerJointAttachment* point = kv.second;
+        if (!point) continue;
+        for (const auto& objp : point->mAttachedObjects)
+        {
+            LLViewerObject* root = objp.get();
+            if (!root || root->isDead()) continue;
+            const std::string pname = point->getName();
+            const bool hud = point->getIsHUDAttachment();
+            ai_add_touchable(ev["items"], root, root, pname, hud, 1);
+            S32 link = 2;
+            for (const auto& child : root->getChildren())
+            {
+                ai_add_touchable(ev["items"], child.get(), root, pname, hud, link);
+                ++link;
+            }
+        }
+    }
+    LLAISocket::instance().sendEvent(ev);
+}
+
+void LLAICommands::cmdClickObject(const LLSD& p)
+{
+    if (!p.has("id")) { sendError("click_object", "missing_id"); return; }
+    LLViewerObject* obj = gObjectList.findObject(LLUUID(p["id"].asString()));
+    if (!obj || obj->isDead()) { sendError("click_object", "object_not_found"); return; }
+    if (gRRenabled && !gAgent.mRRInterface.canTouch(obj))
+    {
+        sendError("click_object", "rlv_blocked");
+        return;
+    }
+
+    // Prefer a real pick at the object's centre so the grab carries face, UV and hit position.
+    LLPickInfo pick;
+    std::string mode = "minimal";
+    F64 nx = 0.0, ny = 0.0;
+    if (ai_screen_of(obj, nx, ny))
+    {
+        const LLRect wr = gViewerWindow->getWorldViewRectScaled();
+        const S32 x = wr.mLeft + (S32)(nx * (wr.getWidth() - 1));
+        const S32 y = wr.mTop - (S32)(ny * (wr.getHeight() - 1));
+        LLPickInfo got = gViewerWindow->pickImmediate(x, y, true, true, false, true, false);
+        LLViewerObject* hit = got.getObject().get();
+        if (got.isValid() && hit && (hit == obj || hit->getRootEdit() == obj->getRootEdit()))
+        {
+            pick = got;
+            mode = "surface";
+        }
+    }
+    if (mode == "minimal")
+    {
+        pick.mObjectID = obj->getID();
+        if (p.has("face")) pick.mObjectFace = (S32)p["face"].asInteger();
+        if (p.has("st") && p["st"].isArray() && p["st"].size() >= 2)
+            pick.mSTCoords = LLVector2((F32)p["st"][0].asReal(), (F32)p["st"][1].asReal());
+        if (p.has("uv") && p["uv"].isArray() && p["uv"].size() >= 2)
+            pick.mUVCoords = LLVector2((F32)p["uv"][0].asReal(), (F32)p["uv"][1].asReal());
+    }
+
+    send_ObjectGrab_message(obj, pick, LLVector3::zero);
+
+    LLUUID objId = obj->getID();
+    const F32 hold_ms = p.has("hold_ms") ? (F32)p["hold_ms"].asReal() : 150.f;
+    auto timer = std::make_shared<LLTimer>();
+    deferTimed([objId, pick, timer, hold_ms]() mutable {
+        if (timer->getElapsedTimeF32() * 1000.f < hold_ms) return false;
+        LLViewerObject* o = gObjectList.findObject(objId);
+        if (o) send_ObjectDeGrab_message(o, pick);
+        return true;
+    });
+
+    LLSD ev;
+    ev["event"] = "click_ok";
+    ev["cmd"]   = "click_object";
+    ev["id"]    = objId.asString();
+    ev["mode"]  = mode;
     ev["face"]  = (LLSD::Integer)pick.mObjectFace;
     LLAISocket::instance().sendEvent(ev);
 }

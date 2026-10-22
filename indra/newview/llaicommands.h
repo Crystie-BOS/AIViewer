@@ -22,6 +22,8 @@ public:
 
     // Schedule a one-shot action for the next idle tick (used for DeGrab delay).
     void deferOnce(std::function<void()> fn);
+    // Runs every tick until it returns true (a held click's release).
+    void deferTimed(std::function<bool()> fn) { mTimed.push_back(std::move(fn)); }
 
 private:
     static void idleCB(void* data);
@@ -53,6 +55,10 @@ private:
     void cmdGetNearby(const LLSD& p);
     void cmdGetObjects(const LLSD& p);
     void cmdTouch(const LLSD& p);
+    void cmdPickAt(const LLSD& p);
+    void cmdClickAt(const LLSD& p);
+    void cmdTouchables(const LLSD& p);
+    void cmdClickObject(const LLSD& p);
     void cmdRequestObjectProps(const LLSD& p);
     void cmdNavigateTo(const LLSD& p);
     void cmdNavigateStop(const LLSD& p);
@@ -76,6 +82,7 @@ private:
 
     // Deferred one-shot actions
     std::deque<std::function<void()>> mDeferred;
+    std::deque<std::function<bool()>> mTimed;
 
     struct MoveState
     {
