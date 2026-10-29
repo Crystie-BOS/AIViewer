@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <map>
 #include <memory>
 #include "lltimer.h"
 #include <cstring>
@@ -428,6 +429,7 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "respond_dialog")        cmdRespondDialog(cmd);
     else if (name == "set_auto_capture")      cmdSetAutoCapture(cmd);
     else if (name == "get_parcel_info")       cmdGetParcelInfo(cmd);
+    else if (name == "map_grid")              cmdMapGrid(cmd);
     else if (name == "get_attachments")       cmdGetAttachments(cmd);
     else if (name == "list_inventory")        cmdListInventory(cmd);
     else if (name == "wear_item")             cmdWearItem(cmd);
@@ -2226,6 +2228,144 @@ void LLAICommands::cmdGetParcelInfo(const LLSD& cmd)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// ── map_grid ─────────────────────────────────────────────────────────────────
+
+// A block of the region as a map, so routes can be planned over ground she has
+// never stood on (2026-10-29: her walked-only map covered 47% of Idunn and
+// routes ran 2.6x the straight line). For each cell: the land height, and every
+// surface a ray straight down finds above it (bridge decks, floors, roofs,
+// rocks), with how flat it is and what it is. Done a few ms per frame so the
+// viewer keeps drawing; one "map_grid" event when the block is finished.
+// Rays only see objects this viewer has loaded, so call it from near the block.
+//   {"cmd":"map_grid","x0":0,"y0":0,"w":64,"h":64,"step":1,"top":160,"layers":6}
+// x0/y0 are region metres (cell centres at x0 + (i + 0.5) * step); top is the
+// height rays start from (default: her height + 40 m).
+void LLAICommands::cmdMapGrid(const LLSD& p)
+{
+    LLViewerRegion* region = gAgent.getRegion();
+    if (!region) { sendError("map_grid", "no_region"); return; }
+
+    struct Job
+    {
+        LLViewerRegion* region { nullptr };
+        F32 x0 { 0.f }, y0 { 0.f }, step { 1.f }, top { 0.f };
+        S32 w { 0 }, h { 0 }, layers { 0 }, next { 0 }, rays { 0 };
+        LLSD land, surf, ids;
+        std::map<LLUUID, S32> idIndex;
+        LLTimer timer;
+    };
+    auto job = std::make_shared<Job>();
+    job->region = region;
+    job->x0 = p.has("x0") ? (F32)p["x0"].asReal() : 0.f;
+    job->y0 = p.has("y0") ? (F32)p["y0"].asReal() : 0.f;
+    job->step = llclamp(p.has("step") ? (F32)p["step"].asReal() : 1.f, 0.25f, 8.f);
+    job->w = llclamp(p.has("w") ? p["w"].asInteger() : 64, 1, 256);
+    job->h = llclamp(p.has("h") ? p["h"].asInteger() : 64, 1, 256);
+    if (job->w * job->h > 4096) { sendError("map_grid", "too_many_cells_max_4096"); return; }
+    job->layers = llclamp(p.has("layers") ? p["layers"].asInteger() : 6, 1, 12);
+    job->top = p.has("top") ? (F32)p["top"].asReal() : gAgent.getPositionAgent().mV[VZ] + 40.f;
+    job->land = LLSD::emptyArray();
+    job->surf = LLSD::emptyArray();
+    job->ids = LLSD::emptyArray();
+    job->timer.start();
+    sendOk("map_grid");
+
+    deferTimed([this, job]() -> bool
+    {
+        if (gAgent.getRegion() != job->region)
+        {
+            sendError("map_grid", "region_changed");
+            return true;
+        }
+        const S32 total = job->w * job->h;
+        LLTimer frame;
+        frame.start();
+        while (job->next < total && frame.getElapsedTimeF32() < 0.004f)
+        {
+            const S32 i = job->next % job->w, j = job->next / job->w;
+            ++job->next;
+            const F32 rx = job->x0 + (i + 0.5f) * job->step;
+            const F32 ry = job->y0 + (j + 0.5f) * job->step;
+            const LLVector3 at = job->region->getPosAgentFromRegion(LLVector3(rx, ry, job->top));
+            const F32 land = LLWorld::getInstance()->resolveLandHeightAgent(at);
+            job->land.append(land);
+
+            LLSD cell = LLSD::emptyArray();   // [z, normal z, object index] per surface, top down
+            F32 from = job->top;
+            for (S32 k = 0; k < job->layers && from > land; ++k)
+            {
+                LLVector4a start, end, hit, normal;
+                start.set(at.mV[VX], at.mV[VY], from);
+                end.set(at.mV[VX], at.mV[VY], land - 0.5f);
+                S32 face = -1;
+                ++job->rays;
+                LLViewerObject* obj = gPipeline.lineSegmentIntersectInWorld(
+                    start, end, true /*transparent*/, false /*rigged*/, true /*unselectable*/, false /*reflection probes*/,
+                    &face, nullptr, nullptr, &hit, nullptr, &normal);
+                if (!obj)
+                {
+                    break;
+                }
+                const F32 z = hit.getF32ptr()[2];
+                from = z - 0.05f;
+                LLViewerObject* root = obj;
+                while (root && root->isAttachment())
+                {
+                    root = (LLViewerObject*)root->getParent();
+                }
+                LLViewerObject* top = obj->getRootEdit() ? obj->getRootEdit() : obj;
+                // Avatars, worn things and phantom prims (fog, grass) are not surfaces.
+                if (obj->isAvatar() || obj->isAttachment() || (root && root->isAvatar())
+                    || obj->flagPhantom() || top->flagPhantom())
+                {
+                    continue;
+                }
+                S32 idx = 0;
+                auto found = job->idIndex.find(top->getID());
+                if (found == job->idIndex.end())
+                {
+                    idx = job->ids.size();
+                    job->idIndex[top->getID()] = idx;
+                    job->ids.append(top->getID().asString());
+                }
+                else
+                {
+                    idx = found->second;
+                }
+                LLSD s = LLSD::emptyArray();
+                s.append(z);
+                s.append(normal.getF32ptr()[2]);
+                s.append(idx);
+                cell.append(s);
+            }
+            job->surf.append(cell);
+        }
+        if (job->next < total)
+        {
+            return false;
+        }
+        LLSD ev;
+        ev["event"] = "map_grid";
+        ev["cmd"] = "map_grid";
+        ev["region"] = job->region->getName();
+        ev["x0"] = job->x0;
+        ev["y0"] = job->y0;
+        ev["w"] = job->w;
+        ev["h"] = job->h;
+        ev["step"] = job->step;
+        ev["top"] = job->top;
+        ev["water"] = job->region->getWaterHeight();
+        ev["agent_pos"] = vector3d_to_array(gAgent.getPositionGlobal());
+        ev["land"] = job->land;
+        ev["surf"] = job->surf;
+        ev["ids"] = job->ids;
+        ev["rays"] = job->rays;
+        ev["ms"] = job->timer.getElapsedTimeF32() * 1000.f;
+        LLAISocket::instance().sendEvent(ev);
+        return true;
+    });
+}
 
 void LLAICommands::sendOk(const std::string& cmd)
 {
