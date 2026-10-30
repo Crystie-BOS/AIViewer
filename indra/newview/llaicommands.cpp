@@ -2561,7 +2561,12 @@ void LLAICommands::tickFollow()
         F32 feet = o.mV[VZ] - 1.f;
         start.set(o.mV[VX], o.mV[VY], o.mV[VZ]);
         end.set(o.mV[VX], o.mV[VY], o.mV[VZ] - 3.f);
-        if (solid_hit(start, end, hit, normal, rays)) feet = hit.getF32ptr()[2];
+        LLViewerObject* under = solid_hit(start, end, hit, normal, rays);
+        if (under) feet = hit.getF32ptr()[2];
+        // Already in the water (a stream bed, the pool): the way out is the
+        // point, so water ahead does not stop her.
+        const bool inWater = (under && mFollow.avoid.count(under->getID()))
+            || (!under && LLWorld::getInstance()->resolveLandHeightAgent(o) < region->getWaterHeight() - 0.2f);
         const F32 fdx = face.mV[VX], fdy = face.mV[VY];
         const F32 flen = sqrtf(fdx * fdx + fdy * fdy);
         if (flen > 0.01f && std::abs(yawDelta) < 70.f)
@@ -2609,12 +2614,12 @@ void LLAICommands::tickFollow()
                 const F32 land = LLWorld::getInstance()->resolveLandHeightAgent(LLVector3(px, py, feet));
                 const bool onObj = g && hit.getF32ptr()[2] >= land - 0.05f;
                 const F32 gz = onObj ? hit.getF32ptr()[2] : land;
-                if (onObj && mFollow.avoid.count(g->getID()))
+                if (!inWater && onObj && mFollow.avoid.count(g->getID()))
                 {
                     endFollow("follow_stopped", "water");
                     return;
                 }
-                if (!onObj && land < region->getWaterHeight() - 0.2f)
+                if (!inWater && !onObj && land < region->getWaterHeight() - 0.2f)
                 {
                     endFollow("follow_stopped", "water");
                     return;
