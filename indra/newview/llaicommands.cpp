@@ -2331,13 +2331,14 @@ void LLAICommands::cmdLookAhead(const LLSD& p)
         LLVector4a start, end, hit, normal;
         start.set(job->origin.mV[VX], job->origin.mV[VY], job->origin.mV[VZ]);
         end.set(job->origin.mV[VX], job->origin.mV[VY], job->origin.mV[VZ] - 3.f);
-        if (solid_hit(start, end, hit, normal, job->rays))
+        // Rays find objects, not the land: on bare ground the ray went on
+        // through it to things buried below and her feet came out 0.7 m low
+        // (2026-10-30). The higher of the land and the first object under her.
+        const F32 land = llmin(LLWorld::getInstance()->resolveLandHeightAgent(job->origin), job->origin.mV[VZ]);
+        job->feet = land;
+        if (solid_hit(start, end, hit, normal, job->rays) && hit.getF32ptr()[2] > land)
         {
             job->feet = hit.getF32ptr()[2];
-        }
-        else
-        {
-            job->feet = llmin(LLWorld::getInstance()->resolveLandHeightAgent(job->origin), job->origin.mV[VZ]);
         }
     }
     sendOk("look_ahead");
@@ -2562,11 +2563,20 @@ void LLAICommands::tickFollow()
         start.set(o.mV[VX], o.mV[VY], o.mV[VZ]);
         end.set(o.mV[VX], o.mV[VY], o.mV[VZ] - 3.f);
         LLViewerObject* under = solid_hit(start, end, hit, normal, rays);
-        if (under) feet = hit.getF32ptr()[2];
+        const F32 landHere = LLWorld::getInstance()->resolveLandHeightAgent(o);
+        if (under && hit.getF32ptr()[2] > landHere - 0.05f)
+        {
+            feet = hit.getF32ptr()[2];
+        }
+        else
+        {
+            under = nullptr;              // land, or something buried under it
+            feet = llmin(landHere, o.mV[VZ]);
+        }
         // Already in the water (a stream bed, the pool): the way out is the
         // point, so water ahead does not stop her.
         const bool inWater = (under && mFollow.avoid.count(under->getID()))
-            || (!under && LLWorld::getInstance()->resolveLandHeightAgent(o) < region->getWaterHeight() - 0.2f);
+            || (!under && landHere < region->getWaterHeight() - 0.2f);
         const F32 fdx = face.mV[VX], fdy = face.mV[VY];
         const F32 flen = sqrtf(fdx * fdx + fdy * fdy);
         if (flen > 0.01f && std::abs(yawDelta) < 70.f)
