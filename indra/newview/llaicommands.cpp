@@ -362,6 +362,7 @@ void LLAICommands::onIdle()
 
     // Tick navigation state machine
     tickNavigation();
+    tickFollow();
 
     // Keep the camera behind her when following
     tickFollowCamera();
@@ -431,6 +432,7 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "get_parcel_info")       cmdGetParcelInfo(cmd);
     else if (name == "map_grid")              cmdMapGrid(cmd);
     else if (name == "look_ahead")            cmdLookAhead(cmd);
+    else if (name == "follow_path")           cmdFollowPath(cmd);
     else if (name == "get_attachments")       cmdGetAttachments(cmd);
     else if (name == "list_inventory")        cmdListInventory(cmd);
     else if (name == "wear_item")             cmdWearItem(cmd);
@@ -452,6 +454,7 @@ void LLAICommands::cmdMove(const LLSD& p)
 {
     std::string dir = p.has("dir") ? p["dir"].asString() : "";
     LLAIState::instance().cancelTurn();
+    mFollow.active = false;   // her own moves end a route she was following
     if      (dir == "forward" || dir == "back" || dir == "left" ||
              dir == "right" || dir == "up" || dir == "down")
     {
@@ -2081,6 +2084,7 @@ static void stop_nav_turn()
 
 void LLAICommands::cmdNavigateStop(const LLSD& /*p*/)
 {
+    mFollow.active = false;
     mMove.active = false;
     mMove.dir.clear();
     mNav.active = false;
@@ -2425,6 +2429,228 @@ void LLAICommands::cmdLookAhead(const LLSD& p)
         LLAISocket::instance().sendEvent(ev);
         return true;
     });
+}
+
+// ── follow_path ──────────────────────────────────────────────────────────────
+
+// The viewer walks a whole route (2026-10-30: walked leg by leg from the
+// controller she stopped at every leg, "like an inch worm", and the
+// controller's pauses became hers). Every frame she steers for the route
+// point `look` metres on and walks; four times a second a check from her body
+// stops her for what is really there: something solid within `guard` metres
+// at knee or waist height, the ground dropping more than `drop` metres, or
+// water (below the region's water, or one of `avoid`, the water objects).
+// A new follow_path replaces the one she is on without stopping her.
+//   {"cmd":"follow_path","points":[[x,y],...],"id":"r7","stop_dist":1,"look":2.5,
+//    "guard":1,"drop":1.5,"avoid":["<uuid>",...]}
+// Events: follow_progress {id,index,pos} each second; follow_done {id,pos};
+// follow_stopped {id,reason: blocked|drop|water|stuck|region_changed,
+// what (object id), dist, pos}.
+void LLAICommands::cmdFollowPath(const LLSD& p)
+{
+    LLViewerRegion* region = gAgent.getRegion();
+    if (!region) { sendError("follow_path", "no_region"); return; }
+    if (!p.has("points") || !p["points"].isArray() || p["points"].size() < 1)
+    { sendError("follow_path", "no_points"); return; }
+
+    mNav.active = false;
+    mMove.active = false;
+    mMove.dir.clear();
+    mFollow.active = true;
+    mFollow.id = p.has("id") ? p["id"].asString() : std::string();
+    mFollow.region = region;
+    mFollow.pts.clear();
+    for (LLSD::array_const_iterator it = p["points"].beginArray(); it != p["points"].endArray(); ++it)
+    {
+        const LLSD& q = *it;
+        mFollow.pts.push_back(LLVector3((F32)q[0].asReal(), (F32)q[1].asReal(), 0.f));
+    }
+    mFollow.idx = 0;
+    mFollow.stopDist = llclamp(p.has("stop_dist") ? (F32)p["stop_dist"].asReal() : 1.f, 0.3f, 5.f);
+    mFollow.look = llclamp(p.has("look") ? (F32)p["look"].asReal() : 2.5f, 1.f, 8.f);
+    mFollow.guard = llclamp(p.has("guard") ? (F32)p["guard"].asReal() : 1.f, 0.4f, 4.f);
+    mFollow.drop = llclamp(p.has("drop") ? (F32)p["drop"].asReal() : 1.5f, 0.5f, 10.f);
+    mFollow.avoid.clear();
+    if (p.has("avoid") && p["avoid"].isArray())
+    {
+        for (LLSD::array_const_iterator it = p["avoid"].beginArray(); it != p["avoid"].endArray(); ++it)
+        {
+            mFollow.avoid.insert(LLUUID(it->asString()));
+        }
+    }
+    const F64 now = LLTimer::getElapsedSeconds();
+    mFollow.lastCheck = 0.0;
+    mFollow.lastReport = now;
+    mFollow.lastMoveTime = now;
+    mFollow.lastPos = gAgent.getPositionGlobal();
+    sendOk("follow_path");
+}
+
+void LLAICommands::endFollow(const std::string& event, const std::string& reason)
+{
+    mFollow.active = false;
+    gAgent.clearControlFlags(AGENT_CONTROL_AT_POS);
+    stop_nav_turn();
+    LLSD ev;
+    ev["event"] = event;
+    ev["id"] = mFollow.id;
+    if (!reason.empty()) ev["reason"] = reason;
+    ev["index"] = (LLSD::Integer)mFollow.idx;
+    if (mFollow.region)
+    {
+        const LLVector3 at = mFollow.region->getPosRegionFromAgent(gAgent.getPositionAgent());
+        ev["pos"] = LLSD::emptyArray();
+        ev["pos"].append(at.mV[VX]);
+        ev["pos"].append(at.mV[VY]);
+        ev["pos"].append(at.mV[VZ]);
+    }
+    LLAISocket::instance().sendEvent(ev);
+}
+
+void LLAICommands::tickFollow()
+{
+    if (!mFollow.active) return;
+    LLViewerRegion* region = gAgent.getRegion();
+    if (region != mFollow.region) { endFollow("follow_stopped", "region_changed"); return; }
+
+    const LLVector3 here = region->getPosRegionFromAgent(gAgent.getPositionAgent());
+    auto dist2 = [&](const LLVector3& q) { const F32 dx = q.mV[VX] - here.mV[VX], dy = q.mV[VY] - here.mV[VY]; return sqrtf(dx * dx + dy * dy); };
+    const S32 last = (S32)mFollow.pts.size() - 1;
+    // On along the route: the point she steers for is the first one more
+    // than `look` metres off (the last one at the end).
+    while (mFollow.idx < last && dist2(mFollow.pts[mFollow.idx]) < mFollow.look)
+    {
+        ++mFollow.idx;
+    }
+    const LLVector3& tgt = mFollow.pts[mFollow.idx];
+    if (mFollow.idx == last && dist2(tgt) <= mFollow.stopDist)
+    {
+        endFollow("follow_done", "");
+        return;
+    }
+
+    const F32 tdx = tgt.mV[VX] - here.mV[VX], tdy = tgt.mV[VY] - here.mV[VY];
+    const F32 targetDeg = atan2f(tdx, tdy) * RAD_TO_DEG;
+    const LLVector3 face = gAgent.getFrameAgent().getAtAxis();
+    const F32 curDeg = atan2f(face.mV[VX], face.mV[VY]) * RAD_TO_DEG;
+    F32 yawDelta = targetDeg - curDeg;
+    while (yawDelta >  180.f) yawDelta -= 360.f;
+    while (yawDelta < -180.f) yawDelta += 360.f;
+    if (std::abs(yawDelta) > 4.f)
+    {
+        const F32 yawKey = llclamp(std::abs(yawDelta) / 30.f, 0.15f, 1.f);
+        gAgent.clearControlFlags(AGENT_CONTROL_YAW_POS | AGENT_CONTROL_YAW_NEG);
+        gAgent.moveYaw(yawDelta > 0.f ? -yawKey : yawKey);
+    }
+    else
+    {
+        stop_nav_turn();
+    }
+    if (std::abs(yawDelta) < 70.f)
+    {
+        gAgent.moveAt(1);
+    }
+
+    const F64 now = LLTimer::getElapsedSeconds();
+    if (now - mFollow.lastCheck >= 0.25)
+    {
+        mFollow.lastCheck = now;
+        S32 rays = 0;
+        const LLVector3 o = gAgent.getPositionAgent();
+        LLVector4a start, end, hit, normal;
+        F32 feet = o.mV[VZ] - 1.f;
+        start.set(o.mV[VX], o.mV[VY], o.mV[VZ]);
+        end.set(o.mV[VX], o.mV[VY], o.mV[VZ] - 3.f);
+        if (solid_hit(start, end, hit, normal, rays)) feet = hit.getF32ptr()[2];
+        const F32 fdx = face.mV[VX], fdy = face.mV[VY];
+        const F32 flen = sqrtf(fdx * fdx + fdy * fdy);
+        if (flen > 0.01f && std::abs(yawDelta) < 70.f)
+        {
+            const F32 ux = fdx / flen, uy = fdy / flen;
+            static const F32 UP[2] = { 0.35f, 0.95f };
+            for (F32 up : UP)
+            {
+                start.set(o.mV[VX] + ux * 0.3f, o.mV[VY] + uy * 0.3f, feet + up);
+                end.set(o.mV[VX] + ux * (mFollow.guard + 0.3f), o.mV[VY] + uy * (mFollow.guard + 0.3f), feet + up);
+                if (LLViewerObject* obj = solid_hit(start, end, hit, normal, rays))
+                {
+                    // A slope she walks up is not a wall: only steep faces stop her.
+                    if (normal.getF32ptr()[2] < 0.6f)
+                    {
+                        const F32 hx = hit.getF32ptr()[0] - o.mV[VX], hy = hit.getF32ptr()[1] - o.mV[VY];
+                        LLSD ev;
+                        ev["event"] = "follow_stopped";
+                        ev["id"] = mFollow.id;
+                        ev["reason"] = "blocked";
+                        ev["what"] = obj->getID().asString();
+                        ev["dist"] = sqrtf(hx * hx + hy * hy);
+                        ev["height"] = up;
+                        mFollow.active = false;
+                        gAgent.clearControlFlags(AGENT_CONTROL_AT_POS);
+                        stop_nav_turn();
+                        const LLVector3 at = region->getPosRegionFromAgent(o);
+                        ev["pos"] = LLSD::emptyArray();
+                        ev["pos"].append(at.mV[VX]);
+                        ev["pos"].append(at.mV[VY]);
+                        ev["pos"].append(at.mV[VZ]);
+                        ev["index"] = (LLSD::Integer)mFollow.idx;
+                        LLAISocket::instance().sendEvent(ev);
+                        return;
+                    }
+                }
+            }
+            // The ground a metre and two metres on.
+            for (F32 m = 1.f; m <= 2.f; m += 1.f)
+            {
+                const F32 px = o.mV[VX] + ux * m, py = o.mV[VY] + uy * m;
+                start.set(px, py, feet + 2.f);
+                end.set(px, py, feet - 8.f);
+                LLViewerObject* g = solid_hit(start, end, hit, normal, rays);
+                const F32 land = LLWorld::getInstance()->resolveLandHeightAgent(LLVector3(px, py, feet));
+                const bool onObj = g && hit.getF32ptr()[2] >= land - 0.05f;
+                const F32 gz = onObj ? hit.getF32ptr()[2] : land;
+                if (onObj && mFollow.avoid.count(g->getID()))
+                {
+                    endFollow("follow_stopped", "water");
+                    return;
+                }
+                if (!onObj && land < region->getWaterHeight() - 0.2f)
+                {
+                    endFollow("follow_stopped", "water");
+                    return;
+                }
+                if (feet - gz > mFollow.drop)
+                {
+                    endFollow("follow_stopped", "drop");
+                    return;
+                }
+            }
+        }
+        LLVector3d cur = gAgent.getPositionGlobal();
+        if ((cur - mFollow.lastPos).length() >= 0.3)
+        {
+            mFollow.lastPos = cur;
+            mFollow.lastMoveTime = now;
+        }
+        else if (now - mFollow.lastMoveTime > 3.0)
+        {
+            endFollow("follow_stopped", "stuck");
+            return;
+        }
+    }
+    if (now - mFollow.lastReport >= 1.0)
+    {
+        mFollow.lastReport = now;
+        LLSD ev;
+        ev["event"] = "follow_progress";
+        ev["id"] = mFollow.id;
+        ev["index"] = (LLSD::Integer)mFollow.idx;
+        ev["pos"] = LLSD::emptyArray();
+        ev["pos"].append(here.mV[VX]);
+        ev["pos"].append(here.mV[VY]);
+        ev["pos"].append(here.mV[VZ]);
+        LLAISocket::instance().sendEvent(ev);
+    }
 }
 
 // ── map_grid ─────────────────────────────────────────────────────────────────

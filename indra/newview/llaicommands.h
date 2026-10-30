@@ -5,12 +5,19 @@
 
 #ifndef LL_LLAICOMMANDS_H
 #define LL_LLAICOMMANDS_H
+#include <string>
+#include <vector>
+#include <set>
 
 #include "llsingleton.h"
 #include "llsd.h"
 #include "v3dmath.h"
+#include "v3math.h"
+#include "lluuid.h"
 #include <deque>
 #include <functional>
+
+class LLViewerRegion;
 
 class LLAICommands : public LLSingleton<LLAICommands>
 {
@@ -70,6 +77,9 @@ private:
     void cmdGetParcelInfo(const LLSD& p);
     void cmdMapGrid(const LLSD& p);
     void cmdLookAhead(const LLSD& p);
+    void cmdFollowPath(const LLSD& p);
+    void tickFollow();
+    void endFollow(const std::string& event, const std::string& reason);
     void cmdGetAttachments(const LLSD& p);
     void cmdListInventory(const LLSD& p);
     void cmdWearItem(const LLSD& p);
@@ -136,6 +146,20 @@ private:
         F64       lastMoveTime { 0.0 };
         int       stuckCount   { 0 };
     } mNav;
+
+    // follow_path: the viewer walks a whole route, steering every frame.
+    struct FollowState
+    {
+        bool                    active { false };
+        std::string             id;
+        LLViewerRegion*         region { nullptr };
+        std::vector<LLVector3>  pts;          // region metres
+        S32                     idx { 0 };
+        F32                     stopDist { 1.f }, look { 2.5f }, guard { 1.f }, drop { 1.5f };
+        std::set<LLUUID>        avoid;        // objects that are water to her
+        F64                     lastCheck { 0.0 }, lastReport { 0.0 }, lastMoveTime { 0.0 };
+        LLVector3d              lastPos;
+    } mFollow;
 };
 
 #endif // LL_LLAICOMMANDS_H
