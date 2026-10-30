@@ -2547,9 +2547,19 @@ void LLAICommands::tickFollow()
     {
         stop_nav_turn();
     }
-    if (std::abs(yawDelta) < 70.f)
+    // Walk once she faces the way (more than FOLLOW_FACE_DEG off: turn in
+    // place first). Walking while still turning, she went the way she faced,
+    // and the check ahead looked at the wall beside her and stopped her
+    // (2026-10-30 hand test).
+    static const F32 FOLLOW_FACE_DEG = 35.f;
+    const bool facing = std::abs(yawDelta) < FOLLOW_FACE_DEG;
+    if (facing)
     {
         gAgent.moveAt(1);
+    }
+    else
+    {
+        gAgent.clearControlFlags(AGENT_CONTROL_AT_POS);
     }
 
     const F64 now = LLTimer::getElapsedSeconds();
@@ -2579,7 +2589,7 @@ void LLAICommands::tickFollow()
             || (!under && landHere < region->getWaterHeight() - 0.2f);
         const F32 fdx = face.mV[VX], fdy = face.mV[VY];
         const F32 flen = sqrtf(fdx * fdx + fdy * fdy);
-        if (flen > 0.01f && std::abs(yawDelta) < 70.f)
+        if (flen > 0.01f && facing)
         {
             const F32 ux = fdx / flen, uy = fdy / flen;
             static const F32 UP[2] = { 0.35f, 0.95f };
