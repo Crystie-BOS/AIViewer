@@ -69,6 +69,7 @@ private:
     void cmdSetAutoCapture(const LLSD& p);
     void cmdGetParcelInfo(const LLSD& p);
     void cmdMapGrid(const LLSD& p);
+    void cmdLookAhead(const LLSD& p);
     void cmdGetAttachments(const LLSD& p);
     void cmdListInventory(const LLSD& p);
     void cmdWearItem(const LLSD& p);

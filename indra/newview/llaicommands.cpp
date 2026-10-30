@@ -430,6 +430,7 @@ void LLAICommands::dispatch(const LLSD& cmd)
     else if (name == "set_auto_capture")      cmdSetAutoCapture(cmd);
     else if (name == "get_parcel_info")       cmdGetParcelInfo(cmd);
     else if (name == "map_grid")              cmdMapGrid(cmd);
+    else if (name == "look_ahead")            cmdLookAhead(cmd);
     else if (name == "get_attachments")       cmdGetAttachments(cmd);
     else if (name == "list_inventory")        cmdListInventory(cmd);
     else if (name == "wear_item")             cmdWearItem(cmd);
@@ -2228,6 +2229,203 @@ void LLAICommands::cmdGetParcelInfo(const LLSD& cmd)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// ── look_ahead ───────────────────────────────────────────────────────────────
+
+// What lies ahead of her, from her body, not her camera (2026-10-30: her eyes
+// were the camera behind her head, so a dark tunnel or a walled walkway read as
+// "blocked" and she turned back on paths she knew). A fan of headings round
+// `heading` (compass degrees, 0 north, 90 east); along each, rays level with
+// the ground at knee, waist and head height say how far the way is clear and
+// what is there, and a ray down every metre gives the ground's height (steps,
+// drops, water). Avatars, worn things and phantom prims are seen through.
+// Spread over frames like map_grid; one "look_ahead" event when done.
+//   {"cmd":"look_ahead","heading":90,"span":60,"step":10,"reach":15,"id":"x"}
+namespace
+{
+    // First surface along start->end that is not an avatar, a worn thing or
+    // phantom; null if none. Fills hit/normal and the object's root.
+    LLViewerObject* solid_hit(LLVector4a start, const LLVector4a& end, LLVector4a& hit, LLVector4a& normal,
+                              S32& rays)
+    {
+        for (S32 k = 0; k < 6; ++k)
+        {
+            S32 face = -1;
+            ++rays;
+            LLViewerObject* obj = gPipeline.lineSegmentIntersectInWorld(
+                start, end, true /*transparent*/, false /*rigged*/, true /*unselectable*/, false /*reflection probes*/,
+                &face, nullptr, nullptr, &hit, nullptr, &normal);
+            if (!obj)
+            {
+                return nullptr;
+            }
+            LLViewerObject* root = obj;
+            while (root && root->isAttachment())
+            {
+                root = (LLViewerObject*)root->getParent();
+            }
+            LLViewerObject* top = obj->getRootEdit() ? obj->getRootEdit() : obj;
+            if (obj->isAvatar() || obj->isAttachment() || (root && root->isAvatar())
+                || obj->flagPhantom() || top->flagPhantom())
+            {
+                // On through it, a little past where it was hit.
+                LLVector4a dir;
+                dir.setSub(end, start);
+                dir.normalize3fast();
+                LLVector4a nudge;
+                nudge.setMul(dir, 0.05f);
+                start.setAdd(hit, nudge);
+                continue;
+            }
+            return top;
+        }
+        return nullptr;
+    }
+}
+
+void LLAICommands::cmdLookAhead(const LLSD& p)
+{
+    LLViewerRegion* region = gAgent.getRegion();
+    if (!region) { sendError("look_ahead", "no_region"); return; }
+
+    struct Job
+    {
+        LLViewerRegion* region { nullptr };
+        LLVector3 origin;
+        F32 feet { 0.f }, heading { 0.f }, span { 60.f }, step { 10.f }, reach { 15.f };
+        S32 n { 0 }, next { 0 }, rays { 0 };
+        std::string id;
+        LLSD dirs, ids;
+        std::map<LLUUID, S32> idIndex;
+        LLTimer timer;
+        S32 index(LLViewerObject* o)
+        {
+            auto f = idIndex.find(o->getID());
+            if (f != idIndex.end()) return f->second;
+            const S32 i = ids.size();
+            idIndex[o->getID()] = i;
+            ids.append(o->getID().asString());
+            return i;
+        }
+    };
+    auto job = std::make_shared<Job>();
+    job->region = region;
+    job->origin = gAgent.getPositionAgent();
+    job->heading = p.has("heading") ? (F32)p["heading"].asReal() : 0.f;
+    job->span = llclamp(p.has("span") ? (F32)p["span"].asReal() : 60.f, 0.f, 180.f);
+    job->step = llclamp(p.has("step") ? (F32)p["step"].asReal() : 10.f, 2.f, 90.f);
+    job->reach = llclamp(p.has("reach") ? (F32)p["reach"].asReal() : 15.f, 2.f, 30.f);
+    job->id = p.has("id") ? p["id"].asString() : std::string();
+    job->n = (S32)(2.f * job->span / job->step) + 1;
+    job->dirs = LLSD::emptyArray();
+    job->ids = LLSD::emptyArray();
+    job->timer.start();
+
+    // Her feet: the first solid surface under her (a floor, a deck, a rock),
+    // else the land.
+    {
+        LLVector4a start, end, hit, normal;
+        start.set(job->origin.mV[VX], job->origin.mV[VY], job->origin.mV[VZ]);
+        end.set(job->origin.mV[VX], job->origin.mV[VY], job->origin.mV[VZ] - 3.f);
+        if (solid_hit(start, end, hit, normal, job->rays))
+        {
+            job->feet = hit.getF32ptr()[2];
+        }
+        else
+        {
+            job->feet = llmin(LLWorld::getInstance()->resolveLandHeightAgent(job->origin), job->origin.mV[VZ]);
+        }
+    }
+    sendOk("look_ahead");
+
+    deferTimed([this, job]() -> bool
+    {
+        if (gAgent.getRegion() != job->region)
+        {
+            sendError("look_ahead", "region_changed");
+            return true;
+        }
+        static const F32 HEIGHTS[3] = { 0.35f, 0.95f, 1.6f };   // knee, waist, head over her feet
+        LLTimer frame;
+        frame.start();
+        while (job->next < job->n && frame.getElapsedTimeF32() < 0.004f)
+        {
+            const F32 h = job->heading - job->span + job->step * job->next++;
+            const F32 rad = h * DEG_TO_RAD;
+            const F32 dx = sinf(rad), dy = cosf(rad);
+            const F32 ox = job->origin.mV[VX], oy = job->origin.mV[VY];
+            LLSD dir;
+            dir["h"] = fmodf(h + 360.f, 360.f);
+            LLSD clear = LLSD::emptyArray(), hits = LLSD::emptyArray(), nzs = LLSD::emptyArray();
+            for (F32 up : HEIGHTS)
+            {
+                LLVector4a start, end, hit, normal;
+                const F32 z = job->feet + up;
+                start.set(ox + dx * 0.3f, oy + dy * 0.3f, z);
+                end.set(ox + dx * job->reach, oy + dy * job->reach, z);
+                LLViewerObject* o = solid_hit(start, end, hit, normal, job->rays);
+                if (o)
+                {
+                    const F32 hx = hit.getF32ptr()[0] - ox, hy = hit.getF32ptr()[1] - oy;
+                    clear.append(sqrtf(hx * hx + hy * hy));
+                    hits.append(job->index(o));
+                    nzs.append(normal.getF32ptr()[2]);
+                }
+                else
+                {
+                    clear.append(job->reach);
+                    hits.append(-1);
+                    nzs.append(0.f);
+                }
+            }
+            LLSD ground = LLSD::emptyArray(), gids = LLSD::emptyArray();
+            for (S32 m = 1; m <= (S32)job->reach; ++m)
+            {
+                const F32 px = ox + dx * m, py = oy + dy * m;
+                LLVector4a start, end, hit, normal;
+                start.set(px, py, job->feet + 2.5f);
+                end.set(px, py, job->feet - 8.f);
+                LLViewerObject* o = solid_hit(start, end, hit, normal, job->rays);
+                const F32 land = LLWorld::getInstance()->resolveLandHeightAgent(LLVector3(px, py, job->feet));
+                F32 gz = land;
+                S32 gi = -1;
+                if (o && hit.getF32ptr()[2] >= land - 0.05f)
+                {
+                    gz = hit.getF32ptr()[2];
+                    gi = job->index(o);
+                }
+                ground.append(gz - job->feet);
+                gids.append(gi);
+            }
+            dir["clear"] = clear;
+            dir["hit"] = hits;
+            dir["nz"] = nzs;
+            dir["ground"] = ground;
+            dir["gid"] = gids;
+            job->dirs.append(dir);
+        }
+        if (job->next < job->n)
+        {
+            return false;
+        }
+        LLSD ev;
+        ev["event"] = "look_ahead";
+        ev["cmd"] = "look_ahead";
+        ev["id"] = job->id;
+        ev["region"] = job->region->getName();
+        ev["at"] = vector3d_to_array(LLVector3d(job->region->getPosRegionFromAgent(job->origin)));
+        ev["feet"] = job->feet;
+        ev["water"] = job->region->getWaterHeight() - job->feet;
+        ev["heading"] = job->heading;
+        ev["reach"] = job->reach;
+        ev["dirs"] = job->dirs;
+        ev["ids"] = job->ids;
+        ev["rays"] = job->rays;
+        ev["ms"] = job->timer.getElapsedTimeF32() * 1000.f;
+        LLAISocket::instance().sendEvent(ev);
+        return true;
+    });
+}
 
 // ── map_grid ─────────────────────────────────────────────────────────────────
 
