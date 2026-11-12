@@ -17,6 +17,7 @@
 #include "llviewerregion.h"
 #include "llviewerobjectlist.h"
 #include "llviewerobject.h"
+#include "llviewermenu.h"   // handle_object_sit
 #include "llselectmgr.h"
 #include "llfloaterreg.h"
 #include "llfloater.h"
@@ -1027,8 +1028,28 @@ void LLAICommands::cmdTeleportLandmark(const LLSD& p)
 
 // ── avatar actions ───────────────────────────────────────────────────────────
 
-void LLAICommands::cmdSit(const LLSD& /*p*/)
+void LLAICommands::cmdSit(const LLSD& p)
 {
+    // With an id: sit on that object (a chair, a bench), as the pie menu's
+    // Sit Here does. Without: sit on the ground.
+    if (p.has("id"))
+    {
+        LLUUID id(p["id"].asString());
+        LLViewerObject* obj = id.isNull() ? nullptr : gObjectList.findObject(id);
+        if (!obj || obj->isDead() || obj->isAvatar())
+        {
+            sendError("sit", "object_not_found");
+            return;
+        }
+        if (obj->getPCode() != LL_PCODE_VOLUME)
+        {
+            sendError("sit", "not_sittable");
+            return;
+        }
+        handle_object_sit(id);
+        sendOk("sit");
+        return;
+    }
     gAgent.sitDown();
     sendOk("sit");
 }
